@@ -8,11 +8,9 @@ ENV NODE_ENV=production \
     # Silence headless warning logs
     PUPPETEER_DISABLE_HEADLESS_WARNING=true \
     # Make sure Chrome has writable temp dirs
-    TMPDIR=/tmp \
-    # Fix Chrome crashpad issues
-    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+    TMPDIR=/tmp
 
-# Runtime libs for Chromium - updated package list
+# Runtime libs for Chromium
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates fonts-liberation \
     libasound2 libatk1.0-0 libatk-bridge2.0-0 \
@@ -22,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 \
     libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 \
     libxshmfence1 libxss1 libxtst6 \
-    xdg-utils chromium-browser \
+    xdg-utils \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
