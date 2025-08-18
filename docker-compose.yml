@@ -1,0 +1,17 @@
+version: "3.9"
+services:
+  api:
+    build: ./api
+    ports: ["4002:4002"]
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - PUPPETEER_CACHE_DIR=/usr/src/app/.cache/puppeteer
+    volumes:
+      - /dev/shm:/dev/shm
+  web:
+    build: ./web
+    ports: ["3002:3002"]
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:4002
+    depends_on:
+      - api

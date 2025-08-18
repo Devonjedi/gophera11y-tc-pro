@@ -1,0 +1,47 @@
+{
+  "product": "Vendor LMS Pro",
+  "version": "3.1",
+  "date": "2025-08-10",
+  "criteria": [
+    {
+      "sc": "1.1.1",
+      "level": "A",
+      "status": "supports"
+    },
+    {
+      "sc": "1.2.2",
+      "level": "A",
+      "status": "partially supports"
+    },
+    {
+      "sc": "1.3.1",
+      "level": "A",
+      "status": "supports"
+    },
+    {
+      "sc": "1.4.3",
+      "level": "AA",
+      "status": "supports"
+    },
+    {
+      "sc": "2.1.1",
+      "level": "A",
+      "status": "supports"
+    },
+    {
+      "sc": "2.4.7",
+      "level": "AA",
+      "status": "partially supports"
+    },
+    {
+      "sc": "3.3.1",
+      "level": "A",
+      "status": "does not support"
+    },
+    {
+      "sc": "4.1.2",
+      "level": "A",
+      "status": "partially supports"
+    }
+  ]
+}
