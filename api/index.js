@@ -20,13 +20,59 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-
-/* ------------------------- Security / hardening ------------------------- */
 app.disable('x-powered-by');
-app.use(helmet({ contentSecurityPolicy: false }));
 
+const isDev = process.env.NODE_ENV !== 'production';
 if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', true);
 
+/* ------------------------- CORS (GLOBAL, FIRST) ------------------------- */
+/**
+ * Allow:
+ *  - any origin in ALLOWED_ORIGINS (comma-separated exact origins)
+ *  - any *.vercel.app host (useful for Vercel previews + prod)
+ *  - localhost/127.0.0.1 defaults
+ *  - no Origin header (server-to-server, curl)
+ */
+const allowlistFromEnv = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+const isAllowedOrigin = (origin) => {
+  if (!origin) return true; // allow same-origin / server-to-server
+  try {
+    const u = new URL(origin);
+    if (u.hostname.endsWith('.vercel.app')) return true;
+    if (allowlistFromEnv.includes(origin)) return true;
+    if (isDev) return true; // be permissive in dev
+    return false;
+  } catch {
+    return false;
+  }
+};
+
+const corsOptionsDelegate = (req, cb) => {
+  const origin = req.header('Origin');
+  const allowed = isAllowedOrigin(origin);
+  cb(null, {
+    origin: allowed ? origin : false, // reflect the origin if allowed
+    credentials: true,
+    methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+    allowedHeaders: ['Content-Type','Authorization','X-Requested-With','X-API-Key','x-api-key'],
+    optionsSuccessStatus: 204,
+  });
+};
+
+// Ensure caches differentiate by Origin (important for CDNs)
+app.use((req, res, next) => { res.setHeader('Vary', 'Origin'); next(); });
+app.use(cors(corsOptionsDelegate));
+app.options('*', cors(corsOptionsDelegate));
+
+/* ------------------------- Security / parsing ------------------------- */
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(express.json({ limit: process.env.REQUEST_BODY_LIMIT || '1mb' }));
+
+/* ------------------------- Rate limit AFTER CORS ------------------------- */
 const limiter = rateLimit({
   windowMs: 60 * 1000,
   max: parseInt(process.env.RATE_LIMIT_MAX || '60', 10),
@@ -34,29 +80,6 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 app.use(limiter);
-
-/* ------------------------- CORS ------------------------- */
-const isDev = process.env.NODE_ENV !== 'production';
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
-
-app.use(cors({
-  origin: (origin, callback) => {
-    // Allow server-to-server / curl / same-origin (no Origin header)
-    if (!origin) return callback(null, true);
-    // In dev, allow everything to simplify local work
-    if (isDev) return callback(null, true);
-    // In prod, enforce allowlist
-    return allowedOrigins.includes(origin)
-      ? callback(null, true)
-      : callback(new Error('CORS origin denied'));
-  },
-  credentials: true,
-}));
-
-app.use(express.json({ limit: process.env.REQUEST_BODY_LIMIT || '1mb' }));
 
 /* ------------------------- Auth (permissive by default) ------------------------- */
 /**
@@ -81,25 +104,40 @@ function requireApiKey(req, res, next) {
 /* ------------------------- HTTP + Socket.io ------------------------- */
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: isDev ? '*' : allowedOrigins, methods: ['GET','POST'], credentials: true },
+  cors: {
+    origin: (origin, cb) => cb(null, isAllowedOrigin(origin) ? origin : false),
+    credentials: true,
+    methods: ['GET','POST'],
+  },
+  transports: ['websocket', 'polling'],
+  path: '/socket.io',
+  allowEIO3: true,
 });
 
 let notes = [];
 io.on('connection', (socket) => {
+  console.log('socket connected', socket.id);
   socket.emit('notes:init', notes);
+
   socket.on('notes:add', (note) => {
     const n = { id: Date.now(), ...note };
     notes.push(n);
     io.emit('notes:updated', notes);
   });
+
   socket.on('notes:clear', () => {
     notes = [];
     io.emit('notes:updated', notes);
+  });
+
+  socket.on('disconnect', (reason) => {
+    console.log('socket disconnected', socket.id, reason);
   });
 });
 
 /* ------------------------- Health ------------------------- */
 app.get('/health', (_, res) => res.json({ ok: true }));
+app.get('/healthz', (_, res) => res.json({ ok: true })); // extra health alias
 
 /* ------------------------- Helpers ------------------------- */
 function weightImpact(impact) {
@@ -244,91 +282,4 @@ app.post('/scan', requireApiKey, async (req, res) => {
       return res.status(202).json({ jobId: job.id, status: job.status });
     }
 
-    const safeUrl = await validateAndRejectPrivateHosts(String(url));
-    const out = await runPuppeteerScan(safeUrl);
-    return res.json(out);
-  } catch (e) {
-    return res.status(400).json({ error: e.message || 'scan error' });
-  }
-});
-
-app.get('/scan/status/:id', requireApiKey, (req, res) => {
-  const job = jobs.get(req.params.id);
-  if (!job) return res.status(404).json({ error: 'job not found' });
-  res.json(job);
-});
-
-/* ------------------------- Protect + mount AI & report routes ------------------------- */
-app.use(['/crawl', '/report', '/ai'], requireApiKey);
-
-try { app.use(aiVpatPdf); } catch (_) {}
-try { app.use(aiSummary); } catch (_) {}
-try { app.use(aiVpat); } catch (_) {}
-
-/* Crawl (placeholder) */
-app.get('/crawl', async (req, res) => {
-  res.status(501).json({
-    error: 'Crawl via job queue not implemented in demo. Use /scan to analyze individual pages.'
-  });
-});
-
-/* HTML report */
-app.post('/report', async (req, res) => {
-  try {
-    const { url, results, score } = req.body || {};
-    const now = new Date().toISOString().slice(0, 10);
-    const violations = results?.violations || [];
-    const impacts = { critical: 0, serious: 0, moderate: 0, minor: 0 };
-    for (const v of violations) {
-      if (v.impact && impacts[v.impact] !== undefined) impacts[v.impact]++;
-    }
-    const rows = violations
-      .map(v => `<tr><td>${v.id}</td><td>${v.impact || ''}</td><td>${(v.tags || []).join(', ')}</td><td>${v.help || ''}</td></tr>`)
-      .join('');
-
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Scan Report</title>
-<style>
-body{font:14px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:2rem}
-table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #eee;padding:.5rem;text-align:left}
-.badge{display:inline-block;background:#eef2ff;color:#3730a3;border-radius:999px;padding:2px 8px;margin-right:6px}
-h1,h2{margin:0 0 1rem}
-</style>
-</head><body>
-<h1>Scan Report</h1>
-<p><span class="badge">${url || ''}</span> <span class="badge">${now}</span> <span class="badge">WCAG 2.2</span></p>
-<h2>Summary</h2>
-<ul>
-  <li>Total violations: ${violations.length}</li>
-  <li>Critical: ${impacts.critical} • Serious: ${impacts.serious} • Moderate: ${impacts.moderate} • Minor: ${impacts.minor}</li>
-  <li>Estimated site score: ${typeof score === 'number' ? score + '/100' : 'n/a'}</li>
-</ul>
-<h2>Findings</h2>
-<table><thead><tr><th>Rule</th><th>Impact</th><th>WCAG tags</th><th>Help</th></tr></thead><tbody>${rows}</tbody></table>
-</body></html>`;
-
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(html);
-  } catch (e) {
-    res.status(500).json({ error: e?.message || 'report error' });
-  }
-});
-
-/* ------------------------- Samples ------------------------- */
-app.get('/samples/:name', (req, res) => {
-  const p = path.join(__dirname, '..', 'samples', req.params.name);
-  if (fs.existsSync(p)) res.sendFile(p);
-  else res.status(404).send('Not found');
-});
-
-/* ------------------------- Global error handler ------------------------- */
-app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err && (err.stack || err.message || err));
-  if (res.headersSent) return next(err);
-  res.status(err?.status || 500).json({ error: 'internal server error' });
-});
-
-/* ------------------------- Boot ------------------------- */
-const port = process.env.PORT || 4002;
-server.listen(port, () => {
-  console.log(`GopherA11y-TC Pro API listening on :${port}`);
-});
+    const safeUrl = await validateAndRejectPriv
