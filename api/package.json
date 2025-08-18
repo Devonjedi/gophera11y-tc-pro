@@ -3,13 +3,16 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "@axe-core/puppeteer": "^4.10.2",
     "@google/generative-ai": "^0.24.1",
+    "@sparticuz/chromium": "127.0.0",
     "axe-core": "^4.10.0",
     "axios": "^1.11.0",
     "cors": "^2.8.5",
@@ -19,9 +22,7 @@
     "helmet": "^8.1.0",
     "openai": "^4.55.0",
     "puppeteer": "^22.15.0",
-    "socket.io": "^4.8.1",
-    "@sparticuz/chromium": "^127.0.0",
-    "puppeteer-core": "^22.13.1"
-
+    "puppeteer-core": "^22.13.1",
+    "socket.io": "^4.8.1"
   }
 }
