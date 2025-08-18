@@ -208,50 +208,63 @@ async function validateAndRejectPrivateHosts(urlString) {
 async function runPuppeteerScan(url) {
   let browser;
   try {
-    // Enhanced Chrome flags for containers to avoid crashpad issues
     const launchOptions = {
       headless: 'new',
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gpu',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
         '--no-zygote',
+        '--single-process', // This helps with crashpad issues
+        '--disable-gpu',
         '--disable-crash-reporter',
-        '--disable-crashpad',
+        '--disable-extensions',
+        '--disable-default-apps',
+        '--disable-web-security',
+        '--disable-features=VizDisplayCompositor',
+        '--disable-features=TranslateUI',
         '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',
         '--disable-renderer-backgrounding',
-        '--disable-features=TranslateUI',
-        '--disable-ipc-flooding-protection',
+        '--disable-background-networking',
+        '--disable-sync',
+        '--metrics-recording-only',
+        '--no-default-browser-check',
+        '--no-pings',
+        '--password-store=basic',
+        '--use-mock-keychain',
         '--window-size=1280,800',
         '--user-data-dir=/tmp/chrome-user-data',
         '--data-path=/tmp/chrome-data',
         '--disk-cache-dir=/tmp/chrome-cache',
-        '--single-process', // This can help with container issues
-        '--no-first-run',
-        '--disable-extensions',
-        '--disable-default-apps',
-        '--disable-background-networking',
-        '--disable-sync',
-        '--metrics-recording-only',
-        '--disable-software-rasterizer',
       ],
+      timeout: 60000,
     };
 
-    // Use system Chromium if available (better for containers)
-    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-      launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-    }
-
+    console.log('Launching browser with options:', JSON.stringify(launchOptions, null, 2));
     browser = await puppeteer.launch(launchOptions);
 
     const page = await browser.newPage();
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
+    await page.setViewport({ width: 1280, height: 800 });
+
+    console.log('Navigating to:', url);
+    await page.goto(url, {
+      waitUntil: 'networkidle2',
+      timeout: 60000
+    });
+
+    console.log('Running axe analysis...');
     const results = await new AxePuppeteer(page).analyze();
+
     await browser.close();
+    console.log('Scan completed successfully');
+
     return { url, timestamp: new Date().toISOString(), results };
   } catch (e) {
+    console.error('Puppeteer scan error:', e.message, e.stack);
     if (browser) {
       try {
         await browser.close();
@@ -262,6 +275,7 @@ async function runPuppeteerScan(url) {
     throw e;
   }
 }
+
 
 /* ------------------------- Optional in-memory queue (demo) ------------------------- */
 const jobs = new Map(); // id -> { id, status, url, result, error, createdAt, updatedAt }
