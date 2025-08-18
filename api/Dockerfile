@@ -1,14 +1,16 @@
 # /api/Dockerfile
-# Use Debian 12 slim to reduce CVEs vs bullseye.
 FROM node:20-bookworm-slim
 
 ENV NODE_ENV=production \
-    # Let Puppeteer manage its own Chromium (default). If you prefer system chromium,
-    # set PUPPETEER_SKIP_DOWNLOAD=true and install chromium, then set EXECUTABLE_PATH.
+    # Let Puppeteer download its matching Chromium
     PUPPETEER_SKIP_DOWNLOAD=false \
-    PUPPETEER_CACHE_DIR=/usr/local/share/puppeteer
+    PUPPETEER_CACHE_DIR=/usr/local/share/puppeteer \
+    # Silence headless warning logs
+    PUPPETEER_DISABLE_HEADLESS_WARNING=true \
+    # Make sure Chrome has writable temp dirs
+    TMPDIR=/tmp
 
-# Install only the runtime libs Chromium needs (no recommends).
+# Runtime libs for Chromium
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates fonts-liberation \
     libasound2 libatk1.0-0 libatk-bridge2.0-0 \
@@ -23,20 +25,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install prod deps only
+# Install prod deps first (better layer cache)
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 # Copy the rest
 COPY . .
 
-# Create a non-root user to run the app
+# Create Chrome temp dirs & ensure they’re writable at runtime
+RUN mkdir -p /tmp/chrome-user-data /tmp/chrome-cache /tmp/chrome-data \
+ && chmod -R 0777 /tmp/chrome-user-data /tmp/chrome-cache /tmp/chrome-data
+
+# Run as non-root (your original)
 RUN useradd -r -u 1001 -g root appuser && chown -R appuser:root /app
 USER appuser
 
 EXPOSE 4002
 
-# Optional healthcheck (Node 20 has fetch)
-HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD node -e "fetch('http://127.0.0.1:4002/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+# Simple healthcheck
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:4002/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 
 CMD ["node", "index.js"]

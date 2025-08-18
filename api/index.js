@@ -18,10 +18,8 @@ import { router as aiVpatPdf } from './routes/ai-vpat-pdf.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const app = express();
 
-/* ------------------------- Environment ------------------------- */
-const isDev = process.env.NODE_ENV !== 'production';
+const app = express();
 
 /* ------------------------- Security / hardening ------------------------- */
 app.disable('x-powered-by');
@@ -37,57 +35,84 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-/* ------------------------- CORS helpers ------------------------- */
-/**
- * Allow: explicit list via ALLOWED_ORIGINS, plus common preview hosts.
- * Handles both Express and Socket.IO handshakes.
- */
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
+/* ------------------------- CORS ------------------------- */
+const isDev = process.env.NODE_ENV !== 'production';
+
+const rawAllowed = (process.env.ALLOWED_ORIGINS ||
+  'http://localhost:3000,http://127.0.0.1:3000')
   .split(',')
-  .map(s => s.trim())
+  .map((s) => s.trim())
   .filter(Boolean);
 
-function isAllowedOrigin(origin) {
-  // server-to-server / curl / same-origin (no Origin header)
-  if (!origin) return true;
-  if (isDev) return true; // wide-open in dev
+/**
+ * Allow exact origins or wildcard subdomains:
+ * - exact: "https://example.com"
+ * - host-only: "example.com"
+ * - wildcard: "*.vercel.app"
+ */
+function isOriginAllowed(origin) {
+  if (!origin) return true; // same-origin / curl / server-to-server
+  if (isDev) return true;
 
+  let host;
   try {
     const u = new URL(origin);
-    const host = u.hostname.toLowerCase();
-
-    // exact string match (protocol+host)
-    if (allowedOrigins.includes(origin)) return true;
-    // host-only convenience (in case user put https://example.com in env but origin has trailing slash)
-    if (allowedOrigins.includes(`${u.protocol}//${u.host}`)) return true;
-
-    // allow all Vercel preview subdomains (so you don’t have to keep updating env)
-    if (host.endsWith('.vercel.app')) return true;
-
-    // (optional) allow your own Render frontend(s) if you preview there too
-    // if (host.endsWith('.onrender.com')) return true;
-
-    return false;
+    host = u.hostname; // e.g. "foo.vercel.app"
   } catch {
     return false;
   }
+
+  for (const entry of rawAllowed) {
+    if (!entry) continue;
+
+    // Accept both full origin form and host-only form in env.
+    if (entry.startsWith('http://') || entry.startsWith('https://')) {
+      if (origin === entry) return true;
+      try {
+        const eu = new URL(entry);
+        if (eu.hostname && eu.hostname === host) return true;
+      } catch {
+        /* ignore */
+      }
+    } else if (entry.startsWith('*.')) {
+      const suffix = entry.slice(1); // ".vercel.app"
+      if (host === entry.slice(2) || host.endsWith(suffix)) return true;
+    } else {
+      // plain host exact match
+      if (host === entry) return true;
+    }
+  }
+  return false;
 }
 
-const expressCors = cors({
-  origin(origin, cb) {
-    return isAllowedOrigin(origin) ? cb(null, true) : cb(new Error('CORS origin denied'));
-  },
-  credentials: true,
-});
+const corsOrigin = (origin, callback) => {
+  try {
+    if (isOriginAllowed(origin)) return callback(null, true);
+    return callback(new Error('CORS origin denied'));
+  } catch {
+    return callback(new Error('CORS origin parse error'));
+  }
+};
 
-app.use(expressCors);
-app.options('*', expressCors); // respond to preflights
+app.use(
+  cors({
+    origin: corsOrigin,
+    credentials: true,
+  })
+);
 
 app.use(express.json({ limit: process.env.REQUEST_BODY_LIMIT || '1mb' }));
 
 /* ------------------------- Auth (permissive by default) ------------------------- */
+/**
+ * In dev or when ALLOW_UNSECURED=true: allow all.
+ * In production: only enforce if ADMIN_API_KEY (or legacy API_KEY) is set.
+ * We do NOT use GEMINI_API_KEY for auth.
+ */
 function requireApiKey(req, res, next) {
-  if (isDev || process.env.ALLOW_UNSECURED === 'true') return next();
+  if (isDev || process.env.ALLOW_UNSECURED === 'true') {
+    return next();
+  }
   const secret = (process.env.ADMIN_API_KEY || process.env.API_KEY || '').trim();
   if (!secret) return next(); // open in prod if no admin key configured
 
@@ -101,14 +126,12 @@ function requireApiKey(req, res, next) {
 /* ------------------------- HTTP + Socket.io ------------------------- */
 const server = http.createServer(app);
 const io = new Server(server, {
-  path: '/socket.io',
   cors: {
-    origin(origin, cb) {
-      return isAllowedOrigin(origin) ? cb(null, true) : cb(new Error('CORS origin denied'));
-    },
+    origin: corsOrigin,
     methods: ['GET', 'POST'],
     credentials: true,
   },
+  path: '/socket.io',
 });
 
 let notes = [];
@@ -131,11 +154,16 @@ app.get('/health', (_, res) => res.json({ ok: true }));
 /* ------------------------- Helpers ------------------------- */
 function weightImpact(impact) {
   switch ((impact || '').toLowerCase()) {
-    case 'critical': return 5;
-    case 'serious':  return 3;
-    case 'moderate': return 1;
-    case 'minor':    return 0.5;
-    default:         return 1;
+    case 'critical':
+      return 5;
+    case 'serious':
+      return 3;
+    case 'moderate':
+      return 1;
+    case 'minor':
+      return 0.5;
+    default:
+      return 1;
   }
 }
 
@@ -151,7 +179,7 @@ async function validateAndRejectPrivateHosts(urlString) {
 
   const hostWhitelist = (process.env.SCAN_HOST_WHITELIST || '')
     .split(',')
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean);
   if (hostWhitelist.length && !hostWhitelist.includes(parsed.hostname)) {
     throw new Error('hostname not allowed');
@@ -160,15 +188,17 @@ async function validateAndRejectPrivateHosts(urlString) {
   try {
     const addrs = await dns.lookup(parsed.hostname, { all: true });
     const isPrivate = (ip) => {
+      // IPv4 RFC1918 + loopback
       if (/^10\./.test(ip)) return true;
       if (/^192\.168\./.test(ip)) return true;
       if (/^127\./.test(ip)) return true;
       if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(ip)) return true;
+      // IPv6 loopback + unique local (fc00::/7)
       if (/^::1$/.test(ip)) return true;
-      if (/^(fc|fd)/i.test(ip)) return true; // fc00::/7
+      if (/^(fc|fd)/i.test(ip)) return true;
       return false;
     };
-    if (addrs.some(a => isPrivate(a.address))) throw new Error('hostname resolves to disallowed IP');
+    if (addrs.some((a) => isPrivate(a.address))) throw new Error('hostname resolves to disallowed IP');
   } catch {
     throw new Error('unable to resolve hostname');
   }
@@ -178,18 +208,25 @@ async function validateAndRejectPrivateHosts(urlString) {
 async function runPuppeteerScan(url) {
   let browser;
   try {
+    // Stable Chromium flags for containers to avoid crashpad issues
     browser = await puppeteer.launch({
-      headless: 'new',
+      headless: 'new', // or true
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
-        '--disable-software-rasterizer',
-        '--disable-crash-reporter',
         '--no-zygote',
+        '--disable-crash-reporter',
+        '--window-size=1280,800',
+        '--user-data-dir=/tmp/chrome-user-data',
+        '--data-path=/tmp/chrome-data',
+        '--disk-cache-dir=/tmp/chrome-cache',
       ],
+      // If you ever switch to puppeteer-core + system chromium, set executablePath here.
+      // executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     });
+
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
     const results = await new AxePuppeteer(page).analyze();
@@ -214,13 +251,17 @@ function makeJobId() {
 function enqueueJob(url) {
   const id = makeJobId();
   const job = {
-    id, status: 'queued', url,
-    result: null, error: null,
-    createdAt: Date.now(), updatedAt: Date.now()
+    id,
+    status: 'queued',
+    url,
+    result: null,
+    error: null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
   };
   jobs.set(id, job);
   queue.push(id);
-  processQueue().catch(err => console.error('Queue worker error:', err));
+  processQueue().catch((err) => console.error('Queue worker error:', err));
   return job;
 }
 
@@ -231,16 +272,19 @@ async function processQueue() {
     if (!job) continue;
 
     processing++;
-    job.status = 'running'; job.updatedAt = Date.now();
+    job.status = 'running';
+    job.updatedAt = Date.now();
     try {
       const safeUrl = await validateAndRejectPrivateHosts(job.url);
       const out = await runPuppeteerScan(safeUrl);
       job.result = out;
-      job.status = 'completed'; job.updatedAt = Date.now();
+      job.status = 'completed';
+      job.updatedAt = Date.now();
       io.emit('scan:done', { jobId, url: safeUrl, timestamp: job.updatedAt });
     } catch (err) {
       job.error = String(err?.message || err);
-      job.status = 'failed'; job.updatedAt = Date.now();
+      job.status = 'failed';
+      job.updatedAt = Date.now();
     } finally {
       processing--;
     }
@@ -248,6 +292,10 @@ async function processQueue() {
 }
 
 /* ------------------------- Scan endpoints ------------------------- */
+/**
+ * Synchronous by default (matches your current UI).
+ * Pass ?async=1 to enqueue and return a job id instead.
+ */
 app.get('/scan', requireApiKey, async (req, res) => {
   try {
     const { url, async: asyncFlag } = req.query;
@@ -293,14 +341,20 @@ app.get('/scan/status/:id', requireApiKey, (req, res) => {
 /* ------------------------- Protect + mount AI & report routes ------------------------- */
 app.use(['/crawl', '/report', '/ai'], requireApiKey);
 
-try { app.use(aiVpatPdf); } catch (_) {}
-try { app.use(aiSummary); } catch (_) {}
-try { app.use(aiVpat); } catch (_) {}
+try {
+  app.use(aiVpatPdf);
+} catch (_) {}
+try {
+  app.use(aiSummary);
+} catch (_) {}
+try {
+  app.use(aiVpat);
+} catch (_) {}
 
 /* Crawl (placeholder) */
 app.get('/crawl', async (req, res) => {
   res.status(501).json({
-    error: 'Crawl via job queue not implemented in demo. Use /scan to analyze individual pages.'
+    error: 'Crawl via job queue not implemented in demo. Use /scan to analyze individual pages.',
   });
 });
 
@@ -315,7 +369,12 @@ app.post('/report', async (req, res) => {
       if (v.impact && impacts[v.impact] !== undefined) impacts[v.impact]++;
     }
     const rows = violations
-      .map(v => `<tr><td>${v.id}</td><td>${v.impact || ''}</td><td>${(v.tags || []).join(', ')}</td><td>${v.help || ''}</td></tr>`)
+      .map(
+        (v) =>
+          `<tr><td>${v.id}</td><td>${v.impact || ''}</td><td>${(v.tags || []).join(
+            ', '
+          )}</td><td>${v.help || ''}</td></tr>`
+      )
       .join('');
 
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>Scan Report</title>
@@ -363,4 +422,7 @@ app.use((err, req, res, next) => {
 const port = process.env.PORT || 4002;
 server.listen(port, () => {
   console.log(`GopherA11y-TC Pro API listening on :${port}`);
+  if (!isDev) {
+    console.log('Allowed origins:', rawAllowed.join(', ') || '(none)');
+  }
 });
