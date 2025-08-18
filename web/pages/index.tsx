@@ -6,11 +6,8 @@ import { Chart, BarElement, CategoryScale, LinearScale, Tooltip, Legend } from '
 import { saveAs } from 'file-saver';
 Chart.register(BarElement, CategoryScale, LinearScale, Tooltip, Legend);
 
-const API = process.env.NEXT_PUBLIC_API_URL || '/api';
-const SOCKET_URL =
-  process.env.NEXT_PUBLIC_SOCKET_URL ||
-  process.env.NEXT_PUBLIC_API_URL ||          // if you set only one env, reuse it
-  undefined;                                  // fall back to same-origin if undefined
+const API = process.env.NEXT_PUBLIC_API_URL || 'https://gophera11y-api.onrender.com';
+const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'https://gophera11y-api.onrender.com';
 
 type AxeViolation = { id: string; impact?: string; help: string; tags: string[]; nodes: any[] };
 type ScanData = any;

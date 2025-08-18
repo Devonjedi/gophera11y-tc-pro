@@ -19,9 +19,8 @@ export default function App({ Component, pageProps }: AppProps) {
     if (typeof window === 'undefined') return;
     if (socketRef.current) return;
 
-    const base =
-      process.env.NEXT_PUBLIC_API_ORIGIN ||
-      'https://gophera11y-api.onrender.com';
+    // Use consistent API URL - same as your backend
+    const base = process.env.NEXT_PUBLIC_API_URL || 'https://gophera11y-api.onrender.com';
 
     const socket = io(base, {
       withCredentials: true,        // set to false if you don't use cookies

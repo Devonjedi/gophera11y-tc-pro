@@ -6,7 +6,7 @@ import { Chart, BarElement, CategoryScale, LinearScale, Tooltip, Legend } from '
 import { saveAs } from 'file-saver';
 Chart.register(BarElement, CategoryScale, LinearScale, Tooltip, Legend);
 
-const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4002';
+const API = process.env.NEXT_PUBLIC_API_URL || 'https://gophera11y-api.onrender.com';
 
 type CrawlPage = { url:string, depth:number, impacts:{critical:number,serious:number,moderate:number,minor:number}, total:number, score:number, error?:string };
 type Progress = { processed:number, queued:number, currentUrl:string };
