@@ -208,9 +208,9 @@ async function validateAndRejectPrivateHosts(urlString) {
 async function runPuppeteerScan(url) {
   let browser;
   try {
-    // Stable Chromium flags for containers to avoid crashpad issues
-    browser = await puppeteer.launch({
-      headless: 'new', // or true
+    // Enhanced Chrome flags for containers to avoid crashpad issues
+    const launchOptions = {
+      headless: 'new',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -218,14 +218,33 @@ async function runPuppeteerScan(url) {
         '--disable-gpu',
         '--no-zygote',
         '--disable-crash-reporter',
+        '--disable-crashpad',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-features=TranslateUI',
+        '--disable-ipc-flooding-protection',
         '--window-size=1280,800',
         '--user-data-dir=/tmp/chrome-user-data',
         '--data-path=/tmp/chrome-data',
         '--disk-cache-dir=/tmp/chrome-cache',
+        '--single-process', // This can help with container issues
+        '--no-first-run',
+        '--disable-extensions',
+        '--disable-default-apps',
+        '--disable-background-networking',
+        '--disable-sync',
+        '--metrics-recording-only',
+        '--disable-software-rasterizer',
       ],
-      // If you ever switch to puppeteer-core + system chromium, set executablePath here.
-      // executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-    });
+    };
+
+    // Use system Chromium if available (better for containers)
+    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+      launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
+
+    browser = await puppeteer.launch(launchOptions);
 
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
@@ -233,7 +252,13 @@ async function runPuppeteerScan(url) {
     await browser.close();
     return { url, timestamp: new Date().toISOString(), results };
   } catch (e) {
-    if (browser) await browser.close();
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (closeError) {
+        console.error('Error closing browser:', closeError);
+      }
+    }
     throw e;
   }
 }

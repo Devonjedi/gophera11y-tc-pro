@@ -8,9 +8,11 @@ ENV NODE_ENV=production \
     # Silence headless warning logs
     PUPPETEER_DISABLE_HEADLESS_WARNING=true \
     # Make sure Chrome has writable temp dirs
-    TMPDIR=/tmp
+    TMPDIR=/tmp \
+    # Fix Chrome crashpad issues
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
 
-# Runtime libs for Chromium
+# Runtime libs for Chromium - updated package list
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates fonts-liberation \
     libasound2 libatk1.0-0 libatk-bridge2.0-0 \
@@ -20,7 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 \
     libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 \
     libxshmfence1 libxss1 libxtst6 \
-    xdg-utils \
+    xdg-utils chromium-browser \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -32,7 +34,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 # Copy the rest
 COPY . .
 
-# Create Chrome temp dirs & ensure they’re writable at runtime
+# Create Chrome temp dirs & ensure they're writable at runtime
 RUN mkdir -p /tmp/chrome-user-data /tmp/chrome-cache /tmp/chrome-data \
  && chmod -R 0777 /tmp/chrome-user-data /tmp/chrome-cache /tmp/chrome-data
 
