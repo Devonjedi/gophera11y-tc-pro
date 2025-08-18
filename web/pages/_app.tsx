@@ -1,13 +1,21 @@
 import type { AppProps } from 'next/app';
 import { useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
+import Link from 'next/link';
 import '../styles/globals.css';
+
+// (Optional) TS help for window.socket
+declare global {
+  interface Window {
+    socket?: Socket;
+  }
+}
 
 export default function App({ Component, pageProps }: AppProps) {
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
-    // client-only + avoid duplicate connects on HMR
+    // client-only + avoid duplicate connects during HMR/StrictMode
     if (typeof window === 'undefined') return;
     if (socketRef.current) return;
 
@@ -16,7 +24,7 @@ export default function App({ Component, pageProps }: AppProps) {
       'https://gophera11y-api.onrender.com';
 
     const socket = io(base, {
-      withCredentials: true,
+      withCredentials: true,        // set to false if you don't use cookies
       transports: ['websocket', 'polling'],
       path: '/socket.io',
     });
@@ -33,12 +41,12 @@ export default function App({ Component, pageProps }: AppProps) {
     );
 
     socketRef.current = socket;
-    (window as any).socket = socket; // handy for debugging in DevTools
+    window.socket = socket; // handy for DevTools
 
     return () => {
       socket.disconnect();
       socketRef.current = null;
-      delete (window as any).socket;
+      delete window.socket;
     };
   }, []);
 
@@ -49,14 +57,14 @@ export default function App({ Component, pageProps }: AppProps) {
           GopherA11y <span className="tag">Twin Cities</span>
         </h1>
         <div className="nav">
-          <a href="/">Scanner</a>
-          <a href="/crawl">Crawl</a>
-          <a href="/vpat">VPAT</a>
-          <a href="/at-matrix">AT Matrix</a>
-          <a href="/syllabus">Syllabus</a>
-          <a href="/procure">Procurement</a>
-          <a href="/contrast">Contrast</a>
-          <a href="/training">Training</a>
+          <Link href="/">Scanner</Link>
+          <Link href="/crawl">Crawl</Link>
+          <Link href="/vpat">VPAT</Link>
+          <Link href="/at-matrix">AT Matrix</Link>
+          <Link href="/syllabus">Syllabus</Link>
+          <Link href="/procure">Procurement</Link>
+          <Link href="/contrast">Contrast</Link>
+          <Link href="/training">Training</Link>
         </div>
       </div>
       <Component {...pageProps} />

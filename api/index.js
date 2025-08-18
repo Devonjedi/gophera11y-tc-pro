@@ -26,22 +26,52 @@ const isDev = process.env.NODE_ENV !== 'production';
 if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', true);
 
 /* ------------------------- CORS ------------------------- */
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
+const isDev = process.env.NODE_ENV !== 'production';
+
+// Read allowlist from env, support wildcards like https://*.vercel.app
+const rawList = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
   .split(',')
   .map(s => s.trim())
   .filter(Boolean);
 
-const isAllowedOrigin = (origin) => {
-  if (!origin) return true; // same-origin / server-to-server
-  try {
-    const u = new URL(origin);
-    if (u.hostname.endsWith('.vercel.app')) return true; // allow Vercel previews/prod
-    if (allowedOrigins.includes(origin)) return true;
-    return isDev; // wide open in dev
-  } catch {
-    return false;
+// Turn each entry into a matcher (exact string or wildcard *.domain.tld)
+function makeMatcher(entry) {
+  if (entry.includes('*')) {
+    // escape dots, replace * with .+
+    const re = new RegExp('^' + entry
+      .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+      .replace(/\\\*/g, '.+') + '$');
+    return (origin) => re.test(origin || '');
   }
-};
+  return (origin) => origin === entry;
+}
+const originMatchers = rawList.map(makeMatcher);
+
+// Shared origin checker for Express CORS *and* Socket.IO CORS
+function checkOrigin(origin, cb) {
+  // Allow server-to-server / curl / same-origin (no Origin header)
+  if (!origin) return cb(null, true);
+  if (isDev) return cb(null, true);
+  const ok = originMatchers.some(fn => fn(origin));
+  if (ok) return cb(null, true);
+  return cb(new Error('CORS origin denied: ' + origin), false);
+}
+
+app.use(cors({
+  origin: checkOrigin,
+  credentials: true,
+}));
+
+/* ... later, when creating io ... */
+const io = new Server(server, {
+  path: '/socket.io',
+  cors: {
+    origin: checkOrigin,
+    credentials: true,
+    methods: ['GET', 'POST'],
+  },
+});
+
 
 // make sure caches/proxies vary on Origin
 app.use((req, res, next) => { res.setHeader('Vary', 'Origin'); next(); });
