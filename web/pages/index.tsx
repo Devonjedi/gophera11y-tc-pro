@@ -35,29 +35,31 @@ export default function Home() {
   const [gemJson, setGemJson] = useState<any>(null);
 
   useEffect(() => {
-    // Prefer explicit SOCKET_URL; otherwise same-origin + path
-    const s = SOCKET_URL
-      ? io(SOCKET_URL, { path: '/socket.io', transports: ['websocket', 'polling'] })
-      : io({ path: '/socket.io', transports: ['websocket', 'polling'] });
+    const SOCKET_URL =
+      process.env.NEXT_PUBLIC_SOCKET_URL || process.env.NEXT_PUBLIC_API_URL || "";
+
+    const s = io(SOCKET_URL, {
+      path: "/socket.io",
+      transports: ["polling"], // <— Force HTTP long-polling (reliable across Vercel/Render)
+      upgrade: false,
+      withCredentials: true,
+    });
 
     setSocket(s);
 
     const init = (n: Note[]) => setNotes(n);
-    const upd  = (n: Note[]) => setNotes(n);
+    const upd = (n: Note[]) => setNotes(n);
 
-    s.on('notes:init', init);
-    s.on('notes:updated', upd);
-
-    // Helpful logs for troubleshooting
-    s.on('connect_error', (err) => console.warn('socket connect_error:', err?.message || err));
-    s.on('disconnect', (reason) => console.info('socket disconnect:', reason));
+    s.on("notes:init", init);
+    s.on("notes:updated", upd);
 
     return () => {
-      s.off('notes:init', init);
-      s.off('notes:updated', upd);
+      s.off("notes:init", init);
+      s.off("notes:updated", upd);
       s.close();
     };
   }, []);
+
 
   const addNote = () => {
     const text = noteText.trim();
