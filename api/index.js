@@ -32,25 +32,27 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,ht
   .filter(Boolean);
 
 const isAllowedOrigin = (origin) => {
-  if (!origin) return true; // allow same-origin / server-to-server
+  if (!origin) return true; // same-origin / server-to-server
   try {
     const u = new URL(origin);
-    if (u.hostname.endsWith('.vercel.app')) return true; // handy for preview/prod on Vercel
+    if (u.hostname.endsWith('.vercel.app')) return true; // allow Vercel previews/prod
     if (allowedOrigins.includes(origin)) return true;
-    if (isDev) return true;
-    return false;
+    return isDev; // wide open in dev
   } catch {
     return false;
   }
 };
 
+// make sure caches/proxies vary on Origin
 app.use((req, res, next) => { res.setHeader('Vary', 'Origin'); next(); });
+
+// Express CORS: return boolean (true/false)
 app.use(cors({
-  origin: (origin, callback) => callback(null, isAllowedOrigin(origin) ? origin : false),
+  origin: (origin, cb) => cb(null, isAllowedOrigin(origin)),
   credentials: true,
 }));
 app.options('*', cors({
-  origin: (origin, callback) => callback(null, isAllowedOrigin(origin) ? origin : false),
+  origin: (origin, cb) => cb(null, isAllowedOrigin(origin)),
   credentials: true,
 }));
 
@@ -79,11 +81,12 @@ function requireApiKey(req, res, next) {
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: (origin, cb) => cb(null, isAllowedOrigin(origin) ? origin : false),
+    // Socket.IO expects boolean true/false here
+    origin: (origin, cb) => cb(null, isAllowedOrigin(origin)),
     credentials: true,
-    methods: ['GET','POST'],
+    methods: ['GET', 'POST'],
   },
-  transports: ['websocket','polling'],
+  transports: ['websocket', 'polling'],
   path: '/socket.io',
   allowEIO3: true,
 });
@@ -152,17 +155,40 @@ async function validateAndRejectPrivateHosts(urlString) {
   return parsed.href;
 }
 
+/* ------------------------- Puppeteer launcher (Render-safe) ------------------------- */
 async function runPuppeteerScan(url) {
   let browser;
   try {
-    browser = await puppeteer.launch({
+    // ensure Chrome can create its crashpad DB under a writable user-data-dir
+    const userDataDir = '/tmp/puppeteer-user-data';
+    await fs.promises.mkdir(userDataDir, { recursive: true });
+
+    const execPath =
+      process.env.PUPPETEER_EXECUTABLE_PATH ||
+      process.env.CHROMIUM_PATH ||
+      (typeof puppeteer.executablePath === 'function' ? puppeteer.executablePath() : undefined);
+
+    const launchOptions = {
       headless: 'new',
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
+      userDataDir,
+      executablePath: execPath, // undefined is fine; Puppeteer will use bundled Chromium
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-zygote',
+        '--single-process',
+        '--disable-crash-reporter',
+      ],
+    };
+
+    browser = await puppeteer.launch(launchOptions);
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
     const results = await new AxePuppeteer(page).analyze();
     await browser.close();
+
     return { url, timestamp: new Date().toISOString(), results };
   } catch (e) {
     if (browser) await browser.close();
@@ -344,5 +370,5 @@ await mountOptionalRouters();
 const port = process.env.PORT || 4002;
 server.listen(port, () => {
   console.log(`GopherA11y-TC Pro API listening on :${port}`);
-  console.log('CORS allowed:', allowedOrigins.join(', ') || '(empty)', '+ *.vercel.app (dev ok)');
+  console.log('CORS allowed:', (allowedOrigins.join(', ') || '(empty)') + ' + *.vercel.app');
 });
