@@ -25,14 +25,29 @@ const app = express();
 app.disable('x-powered-by');
 app.use(helmet({ contentSecurityPolicy: false }));
 
-if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', true);
+// Set trust proxy BEFORE rate limiting
+if (process.env.TRUST_PROXY === 'true') {
+  app.set('trust proxy', 1); // Trust first proxy (Render's load balancer)
+}
 
 const limiter = rateLimit({
   windowMs: 60 * 1000,
   max: parseInt(process.env.RATE_LIMIT_MAX || '60', 10),
   standardHeaders: true,
   legacyHeaders: false,
+  // Fix the trust proxy issue by being more specific
+  trustProxy: process.env.TRUST_PROXY === 'true',
+  // Add skip successful requests for better UX
+  skipSuccessfulRequests: false,
+  // Custom key generator for better IP detection
+  keyGenerator: (req) => {
+    if (process.env.TRUST_PROXY === 'true') {
+      return req.ip || req.connection.remoteAddress;
+    }
+    return req.connection.remoteAddress;
+  },
 });
+
 app.use(limiter);
 
 /* ------------------------- CORS ------------------------- */
