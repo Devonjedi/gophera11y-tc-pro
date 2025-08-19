@@ -205,12 +205,19 @@ async function validateAndRejectPrivateHosts(urlString) {
   return parsed.href;
 }
 
+// Replace the runPuppeteerScan function in your index.js with this:
+
 async function runPuppeteerScan(url) {
   let browser;
   try {
+    // Create unique temp directories for each scan to avoid conflicts
+    const timestamp = Date.now();
+    const userDataDir = `/tmp/chrome-user-data-${timestamp}`;
+    const cacheDir = `/tmp/chrome-cache-${timestamp}`;
+    const dataDir = `/tmp/chrome-data-${timestamp}`;
+
     const launchOptions = {
       headless: 'new',
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -237,14 +244,29 @@ async function runPuppeteerScan(url) {
         '--password-store=basic',
         '--use-mock-keychain',
         '--window-size=1280,800',
-        '--user-data-dir=/tmp/chrome-user-data',
-        '--data-path=/tmp/chrome-data',
-        '--disk-cache-dir=/tmp/chrome-cache',
+        `--user-data-dir=${userDataDir}`,
+        `--data-path=${dataDir}`,
+        `--disk-cache-dir=${cacheDir}`,
+        // Additional flags to prevent profile corruption
+        '--disable-background-mode',
+        '--disable-client-side-phishing-detection',
+        '--disable-component-update',
+        '--disable-default-apps',
+        '--disable-hang-monitor',
+        '--disable-popup-blocking',
+        '--disable-prompt-on-repost',
+        '--disable-session-crashed-bubble',
+        '--disable-translate',
+        '--metrics-recording-only',
+        '--no-crash-upload',
+        '--safebrowsing-disable-auto-update',
+        '--force-color-profile=srgb',
+        '--disable-ipc-flooding-protection',
       ],
       timeout: 60000,
     };
 
-    console.log('Launching browser with options:', JSON.stringify(launchOptions, null, 2));
+    console.log('Launching browser with timestamp:', timestamp);
     browser = await puppeteer.launch(launchOptions);
 
     const page = await browser.newPage();
@@ -261,6 +283,17 @@ async function runPuppeteerScan(url) {
 
     await browser.close();
     console.log('Scan completed successfully');
+
+    // Clean up temp directories after successful scan
+    try {
+      const fs = await import('fs');
+      const rmSync = fs.rmSync || fs.rmdirSync;
+      rmSync(userDataDir, { recursive: true, force: true });
+      rmSync(cacheDir, { recursive: true, force: true });
+      rmSync(dataDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      console.warn('Warning: Could not clean up temp directories:', cleanupError.message);
+    }
 
     return { url, timestamp: new Date().toISOString(), results };
   } catch (e) {
