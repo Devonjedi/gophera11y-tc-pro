@@ -1,12 +1,11 @@
-# /api/Dockerfile
-# Use Debian 12 slim to reduce CVEs vs bullseye.
+# Use Debian 12 slim to reduce CVEs
 FROM node:20-bookworm-slim
 
 ENV NODE_ENV=production \
-    PUPPETEER_SKIP_DOWNLOAD=false \
+    PUPPETEER_SKIP_DOWNLOAD=true \
     PUPPETEER_CACHE_DIR=/usr/local/share/puppeteer
 
-# Install only runtime libs for Chromium
+# Install only the runtime libraries Chromium needs
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates fonts-liberation \
     libasound2 libatk1.0-0 libatk-bridge2.0-0 \
@@ -21,21 +20,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install dependencies (avoid lock mismatch)
-COPY package*.json ./
-RUN npm install --production && npm cache clean --force
+# Copy package files and install dependencies.  Use npm install instead of npm ci
+COPY package.json package-lock.json ./
+RUN npm install --omit=dev && npm cache clean --force
 
-# Copy the rest of the source
+# Copy remaining files
 COPY . .
 
-# Create non-root user
+# Create a non-root user
 RUN useradd -r -u 1001 -g root appuser && chown -R appuser:root /app
 USER appuser
 
 EXPOSE 4002
 
 # Optional healthcheck
-HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:4002/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD \
+  node -e "fetch('http://127.0.0.1:4002/health').then(r => { if (!r.ok) process.exit(1); }).catch(() => process.exit(1));"
 
 CMD ["node", "index.js"]
