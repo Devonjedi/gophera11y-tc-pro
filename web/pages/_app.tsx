@@ -23,7 +23,7 @@ export default function App({ Component, pageProps }: AppProps) {
     const base = process.env.NEXT_PUBLIC_API_URL || 'https://gophera11y-api.onrender.com';
 
     const socket = io(base, {
-      withCredentials: true,        // set to false if you don't use cookies
+      withCredentials: true,
       transports: ['websocket', 'polling'],
       path: '/socket.io',
     });
