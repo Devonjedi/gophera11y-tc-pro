@@ -12,30 +12,24 @@ import dns from 'dns/promises';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 
-// Optional Sparticuz chromium import. If not installed, fallback to system Chromium.
-let chromium = null;
-try {
-  chromium = await import('@sparticuz/chromium');
-} catch (err) {
-  chromium = null;
-}
-
-// Import AI routes
 import { router as aiSummary } from './routes/ai-summary.js';
 import { router as aiVpat } from './routes/ai-vpat.js';
 import { router as aiVpatPdf } from './routes/ai-vpat-pdf.js';
 
+// __dirname resolution in ES Modules
 const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 
-// --- Security ---
+/* ---------------------------------------------------------------------------
+ * Security & Hardening
+ * ------------------------------------------------------------------------- */
 app.disable('x-powered-by');
 app.use(helmet({ contentSecurityPolicy: false }));
-const isDev = process.env.NODE_ENV !== 'production';
 
-// Rate limiter
+if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', true);
+
 const limiter = rateLimit({
   windowMs: 60 * 1000,
   max: parseInt(process.env.RATE_LIMIT_MAX || '60', 10),
@@ -44,40 +38,60 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// --- CORS ---
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:3002')
+/* ---------------------------------------------------------------------------
+ * CORS Configuration
+ *
+ * - In development (NODE_ENV !== 'production'), all origins are permitted to simplify testing.
+ * - In production, set ALLOWED_ORIGINS to a comma-separated list of allowed
+ *   front-end domains (e.g. Vercel domain). Example:
+ *     ALLOWED_ORIGINS=https://gophera11y-tc-pro.vercel.app,https://gophera11y-tc-pro.onrender.com
+ *
+ * - Credentials (cookies, auth) are enabled so that Socket.IO can share session data.
+ * ------------------------------------------------------------------------- */
+const isDev = process.env.NODE_ENV !== 'production';
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
 
-app.use(cors({
-  origin(origin, cb) {
-    if (!origin) return cb(null, true);
-    // In development, allow all origins
-    if (isDev) return cb(null, true);
-    return allowedOrigins.includes(origin) ? cb(null, true) : cb(new Error('Not allowed by CORS'));
-  },
-  credentials: true,
-}));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // server-to-server or same-origin calls (no Origin header)
+      if (!origin) return callback(null, true);
+      if (isDev) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      return callback(new Error('CORS origin denied'));
+    },
+    credentials: true,
+  })
+);
 
 app.use(express.json({ limit: process.env.REQUEST_BODY_LIMIT || '1mb' }));
 
-// --- API Key Middleware ---
+/* ---------------------------------------------------------------------------
+ * API Key Middleware
+ *
+ * - In development or if ALLOW_UNSECURED=true, requests are accepted without a key.
+ * - In production, define ADMIN_API_KEY (or API_KEY) to protect /scan, /report, /ai endpoints.
+ * ------------------------------------------------------------------------- */
 function requireApiKey(req, res, next) {
-  // In dev or with ALLOW_UNSECURED, skip auth
   if (isDev || process.env.ALLOW_UNSECURED === 'true') return next();
-
   const secret = (process.env.ADMIN_API_KEY || process.env.API_KEY || '').trim();
   if (!secret) return next();
-
   const provided = (req.get('x-api-key') || req.query.api_key || req.body?.api_key || '').trim();
-  if (!provided || provided !== secret) {
-    return res.status(401).json({ error: 'unauthorized' });
-  }
+  if (!provided || provided !== secret) return res.status(401).json({ error: 'unauthorized' });
   return next();
 }
 
-// --- Socket.IO Server ---
+/* ---------------------------------------------------------------------------
+ * HTTP + Socket.IO Setup
+ *
+ * - The Socket.IO server reuses the Express server so that HTTP and WS share
+ *   the same process.
+ * - In production, the CORS configuration MUST mirror the Express CORS settings.
+ * - The path option must match the client connection path (`/socket.io`).
+ * ------------------------------------------------------------------------- */
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
@@ -87,34 +101,52 @@ const io = new Server(server, {
   },
   path: '/socket.io',
 });
+
+/* Shared notes state */
 let notes = [];
 io.on('connection', (socket) => {
+  // send current notes on connect
   socket.emit('notes:init', notes);
+  // add a note
   socket.on('notes:add', (note) => {
     const n = { id: Date.now(), ...note };
     notes.push(n);
     io.emit('notes:updated', notes);
   });
+  // clear notes
   socket.on('notes:clear', () => {
     notes = [];
     io.emit('notes:updated', notes);
   });
 });
 
-// --- Health endpoint ---
+/* ---------------------------------------------------------------------------
+ * Health Endpoint
+ * ------------------------------------------------------------------------- */
 app.get('/health', (_, res) => res.json({ ok: true }));
 
-// --- Helpers for SSRF + job queue ---
+/* ---------------------------------------------------------------------------
+ * Helper functions
+ * ------------------------------------------------------------------------- */
 function weightImpact(impact) {
   switch ((impact || '').toLowerCase()) {
-    case 'critical': return 5;
-    case 'serious':  return 3;
-    case 'moderate': return 1;
-    case 'minor':    return 0.5;
-    default:         return 1;
+    case 'critical':
+      return 5;
+    case 'serious':
+      return 3;
+    case 'moderate':
+      return 1;
+    case 'minor':
+      return 0.5;
+    default:
+      return 1;
   }
 }
 
+/**
+ * Validates a URL before scanning (prevents SSRF / local network scans).
+ * Optionally uses SCAN_HOST_WHITELIST to restrict scanning to known hosts.
+ */
 async function validateAndRejectPrivateHosts(urlString) {
   let parsed;
   try {
@@ -123,6 +155,7 @@ async function validateAndRejectPrivateHosts(urlString) {
   } catch {
     throw new Error('invalid url');
   }
+
   const hostWhitelist = (process.env.SCAN_HOST_WHITELIST || '')
     .split(',')
     .map((s) => s.trim())
@@ -130,6 +163,7 @@ async function validateAndRejectPrivateHosts(urlString) {
   if (hostWhitelist.length && !hostWhitelist.includes(parsed.hostname)) {
     throw new Error('hostname not allowed');
   }
+
   try {
     const addrs = await dns.lookup(parsed.hostname, { all: true });
     const isPrivate = (ip) => {
@@ -150,20 +184,13 @@ async function validateAndRejectPrivateHosts(urlString) {
 async function runPuppeteerScan(url) {
   let browser;
   try {
-    // Use Sparticuz chromium if installed, otherwise system Chrome
-    const launchOpts = {
-      headless: true,
+    // If you installed system Chromium via apt (see Dockerfile), use that path.
+    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+    browser = await puppeteer.launch({
+      headless: 'new',
+      executablePath,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    };
-    if (chromium && chromium.default) {
-      const chr = chromium.default;
-      launchOpts.args = [...(chr.args || []), '--no-sandbox', '--disable-setuid-sandbox'];
-      launchOpts.executablePath = await chr.executablePath();
-      launchOpts.headless = true;
-      // Ensure LD_LIBRARY_PATH contains Sparticuz libs
-      process.env.LD_LIBRARY_PATH = `${process.env.LD_LIBRARY_PATH || ''}:${await chr.libc()}`;
-    }
-    browser = await puppeteer.launch(launchOpts);
+    });
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
     const results = await new AxePuppeteer(page).analyze();
@@ -175,7 +202,9 @@ async function runPuppeteerScan(url) {
   }
 }
 
-// --- In-memory job queue (unchanged) ---
+/* ---------------------------------------------------------------------------
+ * Optional In-Memory Queue (demo) for asynchronous scans
+ * ------------------------------------------------------------------------- */
 const jobs = new Map();
 const queue = [];
 let processing = 0;
@@ -186,7 +215,7 @@ function makeJobId() {
 }
 
 function enqueueJob(url) {
-  const id  = makeJobId();
+  const id = makeJobId();
   const job = {
     id,
     status: 'queued',
@@ -198,14 +227,14 @@ function enqueueJob(url) {
   };
   jobs.set(id, job);
   queue.push(id);
-  processQueue().catch((err) => console.error('Queue worker error:', err));
+  processQueue().catch((err) => console.error('Queue error:', err));
   return job;
 }
 
 async function processQueue() {
   while (processing < CONCURRENCY && queue.length) {
     const jobId = queue.shift();
-    const job   = jobs.get(jobId);
+    const job = jobs.get(jobId);
     if (!job) continue;
     processing++;
     job.status = 'running';
@@ -227,17 +256,24 @@ async function processQueue() {
   }
 }
 
-// --- /scan endpoints (sync + async) ---
+/* ---------------------------------------------------------------------------
+ * Scan Endpoints
+ *
+ * - /scan can be synchronous or asynchronous. Use ?async=1 to queue a job.
+ * ------------------------------------------------------------------------- */
 app.get('/scan', requireApiKey, async (req, res) => {
   try {
     const { url, async: asyncFlag } = req.query;
     if (!url) return res.status(400).json({ error: 'url is required' });
+
+    // queue job if async=1
     if (String(asyncFlag) === '1') {
       const job = enqueueJob(String(url));
       return res.status(202).json({ jobId: job.id, status: job.status });
     }
+
     const safeUrl = await validateAndRejectPrivateHosts(String(url));
-    const out     = await runPuppeteerScan(safeUrl);
+    const out = await runPuppeteerScan(safeUrl);
     return res.json(out);
   } catch (e) {
     return res.status(400).json({ error: e.message || 'scan error' });
@@ -248,12 +284,14 @@ app.post('/scan', requireApiKey, async (req, res) => {
   try {
     const { url, async: asyncFlag } = req.body || {};
     if (!url) return res.status(400).json({ error: 'url is required' });
+
     if (String(asyncFlag) === '1') {
       const job = enqueueJob(String(url));
       return res.status(202).json({ jobId: job.id, status: job.status });
     }
+
     const safeUrl = await validateAndRejectPrivateHosts(String(url));
-    const out     = await runPuppeteerScan(safeUrl);
+    const out = await runPuppeteerScan(safeUrl);
     return res.json(out);
   } catch (e) {
     return res.status(400).json({ error: e.message || 'scan error' });
@@ -266,20 +304,28 @@ app.get('/scan/status/:id', requireApiKey, (req, res) => {
   res.json(job);
 });
 
-// --- Protect /crawl, /report, /ai with API key ---
+/* ---------------------------------------------------------------------------
+ * Protect /crawl, /report, and /ai endpoints
+ * ------------------------------------------------------------------------- */
 app.use(['/crawl', '/report', '/ai'], requireApiKey);
 
-// Mount AI & VPAT routes
-try { app.use(aiVpatPdf); } catch { }
-try { app.use(aiSummary); } catch { }
-try { app.use(aiVpat); } catch { }
+/* AI routes mounted */
+try {
+  app.use(aiVpatPdf);
+} catch {}
+try {
+  app.use(aiSummary);
+} catch {}
+try {
+  app.use(aiVpat);
+} catch {}
 
-// Placeholder for crawl route
+/* Crawl placeholder (not implemented) */
 app.get('/crawl', (_, res) => {
-  res.status(501).json({ error: 'Crawl via job queue not implemented in demo. Use /scan to analyze individual pages.' });
+  res.status(501).json({ error: 'Crawl via job queue not implemented. Use /scan.' });
 });
 
-// HTML report endpoint
+/* HTML Report */
 app.post('/report', async (req, res) => {
   try {
     const { url, results, score } = req.body || {};
@@ -292,24 +338,10 @@ app.post('/report', async (req, res) => {
     const rows = violations
       .map((v) => `<tr><td>${v.id}</td><td>${v.impact || ''}</td><td>${(v.tags || []).join(', ')}</td><td>${v.help || ''}</td></tr>`)
       .join('');
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Scan Report</title>
-<style>
-body{font:14px/1.5 system-ui;margin:2rem}
-table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #eee;padding:.5rem;text-align:left}
-.badge{display:inline-block;background:#eef2ff;color:#3730a3;border-radius:999px;padding:2px 8px;margin-right:6px}
-h1,h2{margin:0 0 1rem}
-</style></head><body>
-<h1>Scan Report</h1>
-<p><span class="badge">${url || ''}</span> <span class="badge">${now}</span> <span class="badge">WCAG 2.2</span></p>
-<h2>Summary</h2>
-<ul>
-<li>Total violations: ${violations.length}</li>
-<li>Critical: ${impacts.critical} • Serious: ${impacts.serious} • Moderate: ${impacts.moderate} • Minor: ${impacts.minor}</li>
-<li>Estimated site score: ${typeof score === 'number' ? score + '/100' : 'n/a'}</li>
-</ul>
-<h2>Findings</h2>
-<table><thead><tr><th>Rule</th><th>Impact</th><th>WCAG tags</th><th>Help</th></tr></thead><tbody>${rows}</tbody></table>
-</body></html>`;
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Scan Report</title><style>body{font:14px/1.5 system-ui;margin:2rem}table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #eee;padding:.5rem;text-align:left}.badge{display:inline-block;background:#eef2ff;color:#3730a3;border-radius:999px;padding:2px 8px;margin-right:6px}</style></head><body>
+<h1>Scan Report</h1><p><span class="badge">${url || ''}</span><span class="badge">${now}</span><span class="badge">WCAG 2.2</span></p>
+<h2>Summary</h2><ul><li>Total violations: ${violations.length}</li><li>Critical: ${impacts.critical} • Serious: ${impacts.serious} • Moderate: ${impacts.moderate} • Minor: ${impacts.minor}</li><li>Estimated site score: ${typeof score === 'number' ? score + '/100' : 'n/a'}</li></ul>
+<h2>Findings</h2><table><thead><tr><th>Rule</th><th>Impact</th><th>WCAG tags</th><th>Help</th></tr></thead><tbody>${rows}</tbody></table></body></html>`;
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(html);
   } catch (e) {
@@ -317,21 +349,27 @@ h1,h2{margin:0 0 1rem}
   }
 });
 
-// Samples route
+/* ---------------------------------------------------------------------------
+ * Sample Files
+ * ------------------------------------------------------------------------- */
 app.get('/samples/:name', (req, res) => {
   const p = path.join(__dirname, '..', 'samples', req.params.name);
   if (fs.existsSync(p)) res.sendFile(p);
   else res.status(404).send('Not found');
 });
 
-// Global error handler
+/* ---------------------------------------------------------------------------
+ * Global Error Handler
+ * ------------------------------------------------------------------------- */
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err && (err.stack || err.message || err));
   if (res.headersSent) return next(err);
   res.status(err?.status || 500).json({ error: 'internal server error' });
 });
 
-// Boot
+/* ---------------------------------------------------------------------------
+ * Boot the server
+ * ------------------------------------------------------------------------- */
 const port = process.env.PORT || 4002;
 server.listen(port, () => {
   console.log(`GopherA11y-TC Pro API listening on :${port}`);

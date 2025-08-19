@@ -1,18 +1,20 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  reactStrictMode: true,
+  // Rewrites to proxy API and Socket.IO calls to the Render API backend.
   async rewrites() {
-    const api = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4002';
+    const apiOrigin =
+      process.env.NEXT_PUBLIC_API_ORIGIN || 'https://gophera11y-api.onrender.com';
     return [
       {
         source: '/api/:path*',
-        destination: `${api}/:path*`,
+        destination: `${apiOrigin}/:path*`,
       },
       {
         source: '/socket.io/:path*',
-        destination: `${api}/socket.io/:path*`,
+        destination: `${apiOrigin}/socket.io/:path*`,
       },
     ];
   },
 };
+
 export default nextConfig;

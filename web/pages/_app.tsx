@@ -3,21 +3,24 @@ import { useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 import '../styles/globals.css';
 
+/**
+ * Top-level App component:
+ * - Creates a single persistent Socket.IO connection.
+ * - Uses the environment variable NEXT_PUBLIC_API_ORIGIN to determine the backend.
+ * - Exposes the socket on window.socket for debugging.
+ */
 export default function App({ Component, pageProps }: AppProps) {
-  // Maintain a single socket connection for the entire app
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
+    // Only run on client and avoid reconnect on hot reload
     if (typeof window === 'undefined') return;
-    if (socketRef.current) return; // avoid duplicate connections (e.g. HMR)
+    if (socketRef.current) return;
 
-    // Pick API origin from env; fallback to Render API deployment
-    const apiOrigin =
-      process.env.NEXT_PUBLIC_API_ORIGIN ||
-      process.env.NEXT_PUBLIC_API_URL ||
-      'https://gophera11y-api.onrender.com';
+    const apiBase =
+      process.env.NEXT_PUBLIC_API_ORIGIN || 'https://gophera11y-api.onrender.com';
 
-    const socket = io(apiOrigin, {
+    const socket = io(apiBase, {
       withCredentials: true,
       transports: ['websocket', 'polling'],
       path: '/socket.io',
@@ -29,15 +32,11 @@ export default function App({ Component, pageProps }: AppProps) {
     socket.on('connect_error', (err) => {
       console.error('[socket] connect_error', err?.message || err);
     });
-    socket.on('notes:init', (notes) => {
-      console.log('[socket] notes:init', notes);
-    });
-    socket.on('notes:updated', (notes) => {
-      console.log('[socket] notes:updated', notes);
-    });
-
+    // You can listen for 'notes:init' and 'notes:updated' here if needed
     socketRef.current = socket;
-    (window as any).socket = socket; // for debugging in DevTools
+
+    // Expose socket on window for debugging
+    (window as any).socket = socket;
 
     return () => {
       socket.disconnect();
