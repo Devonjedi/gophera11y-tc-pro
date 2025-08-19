@@ -1,3 +1,4 @@
+// index.js
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -12,6 +13,10 @@ import dns from 'dns/promises';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 
+// Optional Sparticuz chromium (works well in containers/serverless)
+let chromium = null;
+try { chromium = await import('@sparticuz/chromium'); } catch (_) {}
+
 import { router as aiSummary } from './routes/ai-summary.js';
 import { router as aiVpat } from './routes/ai-vpat.js';
 import { router as aiVpatPdf } from './routes/ai-vpat-pdf.js';
@@ -20,116 +25,111 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+const isDev = process.env.NODE_ENV !== 'production';
 
 /* ------------------------- Security / hardening ------------------------- */
 app.disable('x-powered-by');
 app.use(helmet({ contentSecurityPolicy: false }));
 
-// Set trust proxy BEFORE rate limiting
-if (process.env.TRUST_PROXY === 'true') {
-  app.set('trust proxy', 1); // Trust first proxy (Render's load balancer)
-}
+if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', true);
 
 const limiter = rateLimit({
   windowMs: 60 * 1000,
   max: parseInt(process.env.RATE_LIMIT_MAX || '60', 10),
   standardHeaders: true,
   legacyHeaders: false,
-  // Fix the trust proxy issue by being more specific
-  trustProxy: process.env.TRUST_PROXY === 'true',
-  // Add skip successful requests for better UX
-  skipSuccessfulRequests: false,
-  // Custom key generator for better IP detection
-  keyGenerator: (req) => {
-    if (process.env.TRUST_PROXY === 'true') {
-      return req.ip || req.connection.remoteAddress;
-    }
-    return req.connection.remoteAddress;
-  },
 });
-
 app.use(limiter);
 
-/* ------------------------- CORS ------------------------- */
-const isDev = process.env.NODE_ENV !== 'production';
-
+/* ------------------------- CORS helpers ------------------------- */
 const rawAllowed = (process.env.ALLOWED_ORIGINS ||
   'http://localhost:3000,http://127.0.0.1:3000')
   .split(',')
-  .map((s) => s.trim())
+  .map(s => s.trim())
   .filter(Boolean);
 
-/**
- * Allow exact origins or wildcard subdomains:
- * - exact: "https://example.com"
- * - host-only: "example.com"
- * - wildcard: "*.vercel.app"
- */
-function isOriginAllowed(origin) {
-  if (!origin) return true; // same-origin / curl / server-to-server
-  if (isDev) return true;
+const rawPatterns = (process.env.ALLOWED_ORIGIN_PATTERNS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
 
-  let host;
-  try {
-    const u = new URL(origin);
-    host = u.hostname; // e.g. "foo.vercel.app"
-  } catch {
-    return false;
+/** convert simple wildcard like *.vercel.app or localhost to a regex */
+function wildcardToRegex(pattern) {
+  // if bare word like "localhost", allow any scheme + optional port
+  if (!pattern.includes('://')) {
+    // allow http(s)://localhost(:port)?
+    const esc = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`^https?:\\/\\/${esc}(?::\\d+)?$`, 'i');
   }
+  // escape dots, then replace * with .*
+  const escaped = pattern
+    .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`, 'i');
+}
 
-  for (const entry of rawAllowed) {
-    if (!entry) continue;
+const allowedOrigins = new Set(rawAllowed);
+const allowedRegexes = rawPatterns.map(wildcardToRegex);
 
-    // Accept both full origin form and host-only form in env.
-    if (entry.startsWith('http://') || entry.startsWith('https://')) {
-      if (origin === entry) return true;
-      try {
-        const eu = new URL(entry);
-        if (eu.hostname && eu.hostname === host) return true;
-      } catch {
-        /* ignore */
-      }
-    } else if (entry.startsWith('*.')) {
-      const suffix = entry.slice(1); // ".vercel.app"
-      if (host === entry.slice(2) || host.endsWith(suffix)) return true;
-    } else {
-      // plain host exact match
-      if (host === entry) return true;
-    }
+function isOriginAllowed(origin) {
+  if (!origin) return true; // server-to-server / curl
+  if (allowedOrigins.has(origin)) return true;
+  for (const rx of allowedRegexes) {
+    if (rx.test(origin)) return true;
   }
   return false;
 }
 
-const corsOrigin = (origin, callback) => {
-  try {
-    if (isOriginAllowed(origin)) return callback(null, true);
-    return callback(new Error('CORS origin denied'));
-  } catch {
-    return callback(new Error('CORS origin parse error'));
+function logCors(msg, origin) {
+  if (process.env.DEBUG_CORS === 'true') {
+    console.log(`[CORS] ${msg}`, origin || '(no origin)');
   }
-};
+}
 
-app.use(
-  cors({
-    origin: corsOrigin,
-    credentials: true,
-  })
-);
+/* ------------------------- Express CORS ------------------------- */
+app.use(cors({
+  origin: (origin, callback) => {
+    if (isDev) {
+      logCors('DEV allow', origin);
+      return callback(null, true);
+    }
+    if (!origin) {
+      logCors('no origin (server-to-server) allow', origin);
+      return callback(null, true);
+    }
+    if (isOriginAllowed(origin)) {
+      logCors('allow', origin);
+      return callback(null, true);
+    }
+    logCors('DENY', origin);
+    return callback(new Error('CORS origin denied'));
+  },
+  credentials: true,
+}));
+
+// Explicit preflight for Socket.IO path (helps some proxies)
+app.options('/socket.io/*', (req, res) => {
+  const origin = req.headers.origin;
+  if (isDev || isOriginAllowed(origin)) {
+    res.header('Access-Control-Allow-Origin', origin || '*');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+    res.header('Vary', 'Origin');
+    return res.sendStatus(204);
+  }
+  return res.sendStatus(403);
+});
 
 app.use(express.json({ limit: process.env.REQUEST_BODY_LIMIT || '1mb' }));
 
 /* ------------------------- Auth (permissive by default) ------------------------- */
-/**
- * In dev or when ALLOW_UNSECURED=true: allow all.
- * In production: only enforce if ADMIN_API_KEY (or legacy API_KEY) is set.
- * We do NOT use GEMINI_API_KEY for auth.
- */
 function requireApiKey(req, res, next) {
   if (isDev || process.env.ALLOW_UNSECURED === 'true') {
     return next();
   }
   const secret = (process.env.ADMIN_API_KEY || process.env.API_KEY || '').trim();
-  if (!secret) return next(); // open in prod if no admin key configured
+  if (!secret) return next(); // open if no admin key configured
 
   const provided = (req.get('x-api-key') || req.query.api_key || req.body?.api_key || '').trim();
   if (!provided || provided !== secret) {
@@ -138,15 +138,41 @@ function requireApiKey(req, res, next) {
   return next();
 }
 
-/* ------------------------- HTTP + Socket.io ------------------------- */
+/* ------------------------- HTTP + Socket.IO ------------------------- */
 const server = http.createServer(app);
+
+// Let Engine.IO reflect the request origin in the ACAO header,
+// but still actively validate the origin with allowRequest.
 const io = new Server(server, {
-  cors: {
-    origin: corsOrigin,
-    methods: ['GET', 'POST'],
-    credentials: true,
+  // Reflects origin; we’ll still gate with allowRequest below
+  cors: { origin: true, credentials: true },
+  allowRequest: (req, cb) => {
+    const origin = req.headers.origin;
+    if (isDev || isOriginAllowed(origin)) {
+      return cb(null, true);
+    }
+    logCors('Socket.IO DENY', origin);
+    cb('origin not allowed', false);
   },
   path: '/socket.io',
+});
+
+// Ensure ACAO/credentials headers are present on handshake & subsequent polling
+io.engine.on('initial_headers', (headers, req) => {
+  const origin = req.headers.origin;
+  if (isDev || isOriginAllowed(origin)) {
+    headers['Access-Control-Allow-Origin'] = origin || '*';
+    headers['Access-Control-Allow-Credentials'] = 'true';
+    headers['Vary'] = 'Origin';
+  }
+});
+io.engine.on('headers', (headers, req) => {
+  const origin = req.headers.origin;
+  if (isDev || isOriginAllowed(origin)) {
+    headers['Access-Control-Allow-Origin'] = origin || '*';
+    headers['Access-Control-Allow-Credentials'] = 'true';
+    headers['Vary'] = 'Origin';
+  }
 });
 
 let notes = [];
@@ -169,16 +195,11 @@ app.get('/health', (_, res) => res.json({ ok: true }));
 /* ------------------------- Helpers ------------------------- */
 function weightImpact(impact) {
   switch ((impact || '').toLowerCase()) {
-    case 'critical':
-      return 5;
-    case 'serious':
-      return 3;
-    case 'moderate':
-      return 1;
-    case 'minor':
-      return 0.5;
-    default:
-      return 1;
+    case 'critical': return 5;
+    case 'serious':  return 3;
+    case 'moderate': return 1;
+    case 'minor':    return 0.5;
+    default:         return 1;
   }
 }
 
@@ -194,7 +215,7 @@ async function validateAndRejectPrivateHosts(urlString) {
 
   const hostWhitelist = (process.env.SCAN_HOST_WHITELIST || '')
     .split(',')
-    .map((s) => s.trim())
+    .map(s => s.trim())
     .filter(Boolean);
   if (hostWhitelist.length && !hostWhitelist.includes(parsed.hostname)) {
     throw new Error('hostname not allowed');
@@ -203,127 +224,49 @@ async function validateAndRejectPrivateHosts(urlString) {
   try {
     const addrs = await dns.lookup(parsed.hostname, { all: true });
     const isPrivate = (ip) => {
-      // IPv4 RFC1918 + loopback
       if (/^10\./.test(ip)) return true;
       if (/^192\.168\./.test(ip)) return true;
       if (/^127\./.test(ip)) return true;
       if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(ip)) return true;
-      // IPv6 loopback + unique local (fc00::/7)
-      if (/^::1$/.test(ip)) return true;
-      if (/^(fc|fd)/i.test(ip)) return true;
+      if (/^::1$/.test(ip) || /^fc|^fd/.test(ip)) return true;
       return false;
     };
-    if (addrs.some((a) => isPrivate(a.address))) throw new Error('hostname resolves to disallowed IP');
+    if (addrs.some(a => isPrivate(a.address))) throw new Error('hostname resolves to disallowed IP');
   } catch {
     throw new Error('unable to resolve hostname');
   }
   return parsed.href;
 }
 
-// Replace the runPuppeteerScan function in your index.js with this:
-
 async function runPuppeteerScan(url) {
   let browser;
   try {
-    // Create unique temp directories for each scan to avoid conflicts
-    const timestamp = Date.now();
-    const userDataDir = `/tmp/chrome-user-data-${timestamp}`;
-    const cacheDir = `/tmp/chrome-cache-${timestamp}`;
-    const dataDir = `/tmp/chrome-data-${timestamp}`;
-
-    const launchOptions = {
+    const launchOpts = {
       headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process', // This helps with crashpad issues
-        '--disable-gpu',
-        '--disable-crash-reporter',
-        '--disable-extensions',
-        '--disable-default-apps',
-        '--disable-web-security',
-        '--disable-features=VizDisplayCompositor',
-        '--disable-features=TranslateUI',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding',
-        '--disable-background-networking',
-        '--disable-sync',
-        '--metrics-recording-only',
-        '--no-default-browser-check',
-        '--no-pings',
-        '--password-store=basic',
-        '--use-mock-keychain',
-        '--window-size=1280,800',
-        `--user-data-dir=${userDataDir}`,
-        `--data-path=${dataDir}`,
-        `--disk-cache-dir=${cacheDir}`,
-        // Additional flags to prevent profile corruption
-        '--disable-background-mode',
-        '--disable-client-side-phishing-detection',
-        '--disable-component-update',
-        '--disable-default-apps',
-        '--disable-hang-monitor',
-        '--disable-popup-blocking',
-        '--disable-prompt-on-repost',
-        '--disable-session-crashed-bubble',
-        '--disable-translate',
-        '--metrics-recording-only',
-        '--no-crash-upload',
-        '--safebrowsing-disable-auto-update',
-        '--force-color-profile=srgb',
-        '--disable-ipc-flooding-protection',
-      ],
-      timeout: 60000,
+      args: ['--no-sandbox', '--disable-setuid-sandbox'],
     };
 
-    console.log('Launching browser with timestamp:', timestamp);
-    browser = await puppeteer.launch(launchOptions);
-
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 800 });
-
-    console.log('Navigating to:', url);
-    await page.goto(url, {
-      waitUntil: 'networkidle2',
-      timeout: 60000
-    });
-
-    console.log('Running axe analysis...');
-    const results = await new AxePuppeteer(page).analyze();
-
-    await browser.close();
-    console.log('Scan completed successfully');
-
-    // Clean up temp directories after successful scan
-    try {
-      const fs = await import('fs');
-      const rmSync = fs.rmSync || fs.rmdirSync;
-      rmSync(userDataDir, { recursive: true, force: true });
-      rmSync(cacheDir, { recursive: true, force: true });
-      rmSync(dataDir, { recursive: true, force: true });
-    } catch (cleanupError) {
-      console.warn('Warning: Could not clean up temp directories:', cleanupError.message);
+    // Prefer system Chromium if Sparticuz is unavailable.
+    if (chromium && chromium.default) {
+      const chr = chromium.default;
+      launchOpts.args = [...(await chr.args()), '--no-sandbox', '--disable-setuid-sandbox'];
+      launchOpts.executablePath = await chr.executablePath();
+      launchOpts.headless = true;
+      process.env.LD_LIBRARY_PATH = `${process.env.LD_LIBRARY_PATH || ''}:${await chr.libc()}`;
+      process.env.TMPDIR = process.env.TMPDIR || '/tmp';
     }
 
+    browser = await puppeteer.launch(launchOpts);
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
+    const results = await new AxePuppeteer(page).analyze();
+    await browser.close();
     return { url, timestamp: new Date().toISOString(), results };
   } catch (e) {
-    console.error('Puppeteer scan error:', e.message, e.stack);
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (closeError) {
-        console.error('Error closing browser:', closeError);
-      }
-    }
+    if (browser) await browser.close();
     throw e;
   }
 }
-
 
 /* ------------------------- Optional in-memory queue (demo) ------------------------- */
 const jobs = new Map(); // id -> { id, status, url, result, error, createdAt, updatedAt }
@@ -338,17 +281,13 @@ function makeJobId() {
 function enqueueJob(url) {
   const id = makeJobId();
   const job = {
-    id,
-    status: 'queued',
-    url,
-    result: null,
-    error: null,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
+    id, status: 'queued', url,
+    result: null, error: null,
+    createdAt: Date.now(), updatedAt: Date.now()
   };
   jobs.set(id, job);
   queue.push(id);
-  processQueue().catch((err) => console.error('Queue worker error:', err));
+  processQueue().catch(err => console.error('Queue worker error:', err));
   return job;
 }
 
@@ -359,19 +298,16 @@ async function processQueue() {
     if (!job) continue;
 
     processing++;
-    job.status = 'running';
-    job.updatedAt = Date.now();
+    job.status = 'running'; job.updatedAt = Date.now();
     try {
       const safeUrl = await validateAndRejectPrivateHosts(job.url);
       const out = await runPuppeteerScan(safeUrl);
       job.result = out;
-      job.status = 'completed';
-      job.updatedAt = Date.now();
+      job.status = 'completed'; job.updatedAt = Date.now();
       io.emit('scan:done', { jobId, url: safeUrl, timestamp: job.updatedAt });
     } catch (err) {
       job.error = String(err?.message || err);
-      job.status = 'failed';
-      job.updatedAt = Date.now();
+      job.status = 'failed'; job.updatedAt = Date.now();
     } finally {
       processing--;
     }
@@ -379,10 +315,6 @@ async function processQueue() {
 }
 
 /* ------------------------- Scan endpoints ------------------------- */
-/**
- * Synchronous by default (matches your current UI).
- * Pass ?async=1 to enqueue and return a job id instead.
- */
 app.get('/scan', requireApiKey, async (req, res) => {
   try {
     const { url, async: asyncFlag } = req.query;
@@ -428,20 +360,14 @@ app.get('/scan/status/:id', requireApiKey, (req, res) => {
 /* ------------------------- Protect + mount AI & report routes ------------------------- */
 app.use(['/crawl', '/report', '/ai'], requireApiKey);
 
-try {
-  app.use(aiVpatPdf);
-} catch (_) {}
-try {
-  app.use(aiSummary);
-} catch (_) {}
-try {
-  app.use(aiVpat);
-} catch (_) {}
+try { app.use(aiVpatPdf); } catch (_) {}
+try { app.use(aiSummary); } catch (_) {}
+try { app.use(aiVpat); } catch (_) {}
 
 /* Crawl (placeholder) */
 app.get('/crawl', async (req, res) => {
   res.status(501).json({
-    error: 'Crawl via job queue not implemented in demo. Use /scan to analyze individual pages.',
+    error: 'Crawl via job queue not implemented in demo. Use /scan to analyze individual pages.'
   });
 });
 
@@ -456,12 +382,7 @@ app.post('/report', async (req, res) => {
       if (v.impact && impacts[v.impact] !== undefined) impacts[v.impact]++;
     }
     const rows = violations
-      .map(
-        (v) =>
-          `<tr><td>${v.id}</td><td>${v.impact || ''}</td><td>${(v.tags || []).join(
-            ', '
-          )}</td><td>${v.help || ''}</td></tr>`
-      )
+      .map(v => `<tr><td>${v.id}</td><td>${v.impact || ''}</td><td>${(v.tags || []).join(', ')}</td><td>${v.help || ''}</td></tr>`)
       .join('');
 
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>Scan Report</title>
@@ -509,7 +430,4 @@ app.use((err, req, res, next) => {
 const port = process.env.PORT || 4002;
 server.listen(port, () => {
   console.log(`GopherA11y-TC Pro API listening on :${port}`);
-  if (!isDev) {
-    console.log('Allowed origins:', rawAllowed.join(', ') || '(none)');
-  }
 });
