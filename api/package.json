@@ -12,7 +12,6 @@
   "dependencies": {
     "@axe-core/puppeteer": "^4.10.2",
     "@google/generative-ai": "^0.24.1",
-    "@sparticuz/chromium": "127.0.0",
     "axe-core": "^4.10.0",
     "axios": "^1.11.0",
     "cors": "^2.8.5",

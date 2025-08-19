@@ -1,14 +1,17 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   async rewrites() {
+    // Use NEXT_PUBLIC_API_URL or NEXT_PUBLIC_API_ORIGIN to determine API base.
+    const apiBase =
+      process.env.NEXT_PUBLIC_API_URL ||
+      process.env.NEXT_PUBLIC_API_ORIGIN ||
+      'https://gophera11y-api.onrender.com';
     return [
-      // Proxy REST calls to your API (dev)
-      { source: '/api/:path*', destination: 'http://localhost:4002/:path*' },
-
-      // Proxy Socket.io upgrade requests (dev)
-      { source: '/socket.io/:path*', destination: 'http://localhost:4002/socket.io/:path*' },
+      // Proxy API requests (e.g. /api/scan) to backend
+      { source: '/api/:path*', destination: `${apiBase}/:path*` },
+      // Proxy socket.io websocket/polling requests
+      { source: '/socket.io/:path*', destination: `${apiBase}/socket.io/:path*` },
     ];
   },
 };
-
 export default nextConfig;
