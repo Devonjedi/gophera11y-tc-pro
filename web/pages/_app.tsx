@@ -1,3 +1,4 @@
+// /pages/_app.tsx
 import type { AppProps } from 'next/app';
 import { useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
@@ -7,31 +8,33 @@ export default function App({ Component, pageProps }: AppProps) {
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
-    // Only create the socket in the browser & avoid duplicate connections during HMR
-    if (typeof window === 'undefined') return;
-    if (socketRef.current) return;
+    // Avoid multiple connections in development
+    if (typeof window === 'undefined' || socketRef.current) return;
 
-    const base = process.env.NEXT_PUBLIC_API_ORIGIN || 'https://gophera11y-api.onrender.com';
-    const socket = io(base, {
+    const apiOrigin =
+      process.env.NEXT_PUBLIC_API_ORIGIN || 'https://gophera11y-api.onrender.com';
+
+    const socket = io(apiOrigin, {
       withCredentials: true,
       transports: ['websocket', 'polling'],
       path: '/socket.io',
     });
 
-    socket.on('connect', () => console.log('[socket] connected', socket.id));
-    socket.on('connect_error', (err) =>
-      console.error('[socket] connect_error', err?.message || err)
-    );
-    socket.on('notes:init', (notes) => {
-      // You can dispatch or use state here; we log for demo
+    socket.on('connect', () => {
+      console.log('[socket] connected', socket.id);
+    });
+    socket.on('connect_error', err => {
+      console.error('[socket] connect_error', err?.message || err);
+    });
+    socket.on('notes:init', notes => {
       console.log('[socket] notes:init', notes);
     });
-    socket.on('notes:updated', (notes) => {
+    socket.on('notes:updated', notes => {
       console.log('[socket] notes:updated', notes);
     });
 
     socketRef.current = socket;
-    (window as any).socket = socket; // expose for debugging
+    (window as any).socket = socket; // helpful for debugging
 
     return () => {
       socket.disconnect();
