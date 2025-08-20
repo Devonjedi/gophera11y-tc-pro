@@ -1,3 +1,4 @@
+// index.js
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
@@ -16,19 +17,22 @@ import { router as aiSummary } from './routes/ai-summary.js';
 import { router as aiVpat } from './routes/ai-vpat.js';
 import { router as aiVpatPdf } from './routes/ai-vpat-pdf.js';
 
-// __dirname resolution in ES Modules
+/* ------------------------- Path helpers ------------------------- */
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+/* ------------------------- App init ------------------------- */
 const app = express();
+const isDev = process.env.NODE_ENV !== 'production';
 
-/* ---------------------------------------------------------------------------
- * Security & Hardening
- * ------------------------------------------------------------------------- */
+/* ------------------------- Security / hardening ------------------------- */
 app.disable('x-powered-by');
+// Disable CSP here to avoid blocking Socket.IO fallback; tune later if needed.
 app.use(helmet({ contentSecurityPolicy: false }));
 
-if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', true);
+if (process.env.TRUST_PROXY === 'true') {
+  app.set('trust proxy', true);
+}
 
 const limiter = rateLimit({
   windowMs: 60 * 1000,
@@ -38,121 +42,106 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-/* ---------------------------------------------------------------------------
- * CORS Configuration
- *
- * - In development (NODE_ENV !== 'production'), all origins are permitted to simplify testing.
- * - In production, set ALLOWED_ORIGINS to a comma-separated list of allowed
- *   front-end domains (e.g. Vercel domain). Example:
- *     ALLOWED_ORIGINS=https://gophera11y-tc-pro.vercel.app,https://gophera11y-tc-pro.onrender.com
- *
- * - Credentials (cookies, auth) are enabled so that Socket.IO can share session data.
- * ------------------------------------------------------------------------- */
-// Add near top:
-const isDev = process.env.NODE_ENV !== 'production';
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,https://gophera11y-tc-pro.vercel.app')
+/* ------------------------- CORS (Express) ------------------------- */
+// Build allowlist (exact origins) from env
+const allowlist = (process.env.ALLOWED_ORIGINS ||
+  'http://localhost:3000,http://127.0.0.1:3000,https://gophera11y-tc-pro.vercel.app'
+)
   .split(',')
-  .map((s) => s.trim())
+  .map(s => s.trim())
   .filter(Boolean);
 
-// Replace CORS use:
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin) return callback(null, true); // allow server-to-server and curl
-    if (isDev) return callback(null, true);
-    return allowedOrigins.includes(origin)
-      ? callback(null, true)
-      : callback(new Error('CORS origin denied'));
-  },
-  credentials: true,
-}));
+// Optional wildcard host patterns for convenience
+const originAllowed = (origin) => {
+  if (!origin) return true;                 // same-origin / server-to-server
+  if (isDev) return true;                   // allow all in dev
 
-// Create HTTP + Socket.IO server:
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: isDev ? '*' : allowedOrigins, methods: ['GET','POST'], credentials: true },
-  path: '/socket.io', // ensure client uses same path
-});
+  try {
+    const u = new URL(origin);
+    const exact = allowlist.includes(origin) || allowlist.includes(u.origin);
+    const host = u.hostname || '';
 
+    // Allow *.vercel.app and *.onrender.com unless you want to lock this down
+    const wildcard =
+      /\.vercel\.app$/.test(host) ||
+      /\.onrender\.com$/.test(host);
 
-/* ---------------------------------------------------------------------------
- * API Key Middleware
- *
- * - In development or if ALLOW_UNSECURED=true, requests are accepted without a key.
- * - In production, define ADMIN_API_KEY (or API_KEY) to protect /scan, /report, /ai endpoints.
- * ------------------------------------------------------------------------- */
+    return exact || wildcard;
+  } catch {
+    return false;
+  }
+};
+
+app.use(
+  cors({
+    origin: (origin, cb) => (originAllowed(origin) ? cb(null, true) : cb(new Error('CORS origin denied'))),
+    credentials: true,
+  })
+);
+
+app.use(express.json({ limit: process.env.REQUEST_BODY_LIMIT || '1mb' }));
+
+/* ------------------------- Auth (optional) ------------------------- */
+/**
+ * Dev or ALLOW_UNSECURED=true: allow all.
+ * In production: enforce only if ADMIN_API_KEY (or legacy API_KEY) is set.
+ */
 function requireApiKey(req, res, next) {
   if (isDev || process.env.ALLOW_UNSECURED === 'true') return next();
+
   const secret = (process.env.ADMIN_API_KEY || process.env.API_KEY || '').trim();
-  if (!secret) return next();
+  if (!secret) return next(); // open if no admin key configured
+
   const provided = (req.get('x-api-key') || req.query.api_key || req.body?.api_key || '').trim();
-  if (!provided || provided !== secret) return res.status(401).json({ error: 'unauthorized' });
+  if (!provided || provided !== secret) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
   return next();
 }
 
-/* ---------------------------------------------------------------------------
- * HTTP + Socket.IO Setup
- *
- * - The Socket.IO server reuses the Express server so that HTTP and WS share
- *   the same process.
- * - In production, the CORS configuration MUST mirror the Express CORS settings.
- * - The path option must match the client connection path (`/socket.io`).
- * ------------------------------------------------------------------------- */
+/* ------------------------- HTTP + Socket.IO ------------------------- */
 const server = http.createServer(app);
+
 const io = new Server(server, {
+  path: '/socket.io',
+  transports: ['websocket', 'polling'],
   cors: {
-    origin: isDev ? '*' : allowedOrigins,
-    methods: ['GET', 'POST'],
+    origin: (origin, cb) => (originAllowed(origin) ? cb(null, true) : cb(new Error('CORS origin denied'))),
     credentials: true,
   },
-  path: '/socket.io',
 });
 
-/* Shared notes state */
 let notes = [];
 io.on('connection', (socket) => {
-  // send current notes on connect
   socket.emit('notes:init', notes);
-  // add a note
+
   socket.on('notes:add', (note) => {
     const n = { id: Date.now(), ...note };
     notes.push(n);
     io.emit('notes:updated', notes);
   });
-  // clear notes
+
   socket.on('notes:clear', () => {
     notes = [];
     io.emit('notes:updated', notes);
   });
 });
 
-/* ---------------------------------------------------------------------------
- * Health Endpoint
- * ------------------------------------------------------------------------- */
+/* ------------------------- Health ------------------------- */
 app.get('/health', (_, res) => res.json({ ok: true }));
 
-/* ---------------------------------------------------------------------------
- * Helper functions
- * ------------------------------------------------------------------------- */
+/* ------------------------- Helpers ------------------------- */
 function weightImpact(impact) {
   switch ((impact || '').toLowerCase()) {
-    case 'critical':
-      return 5;
-    case 'serious':
-      return 3;
-    case 'moderate':
-      return 1;
-    case 'minor':
-      return 0.5;
-    default:
-      return 1;
+    case 'critical': return 5;
+    case 'serious':  return 3;
+    case 'moderate': return 1;
+    case 'minor':    return 0.5;
+    default:         return 1;
   }
 }
 
-/**
- * Validates a URL before scanning (prevents SSRF / local network scans).
- * Optionally uses SCAN_HOST_WHITELIST to restrict scanning to known hosts.
- */
+/** Restrict SSRF / private IPs; optional host allowlist via SCAN_HOST_WHITELIST */
 async function validateAndRejectPrivateHosts(urlString) {
   let parsed;
   try {
@@ -164,8 +153,9 @@ async function validateAndRejectPrivateHosts(urlString) {
 
   const hostWhitelist = (process.env.SCAN_HOST_WHITELIST || '')
     .split(',')
-    .map((s) => s.trim())
+    .map(s => s.trim())
     .filter(Boolean);
+
   if (hostWhitelist.length && !hostWhitelist.includes(parsed.hostname)) {
     throw new Error('hostname not allowed');
   }
@@ -180,56 +170,62 @@ async function validateAndRejectPrivateHosts(urlString) {
       if (/^::1$/.test(ip) || /^fc|^fd/.test(ip)) return true;
       return false;
     };
-    if (addrs.some((a) => isPrivate(a.address))) throw new Error('hostname resolves to disallowed IP');
+    if (addrs.some(a => isPrivate(a.address))) throw new Error('hostname resolves to disallowed IP');
   } catch {
     throw new Error('unable to resolve hostname');
   }
+
   return parsed.href;
+}
+
+/* ------------------------- Puppeteer (system Chromium) ------------------------- */
+function getChromePath() {
+  const candidates = [
+    process.env.CHROME_PATH,
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+  ].filter(Boolean);
+
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch (_) {}
+  }
+  return null;
 }
 
 async function runPuppeteerScan(url) {
   let browser;
   try {
-    // Try to load Sparticuz chromium at runtime; if not installed, we just use system Chrome.
-    let chromium = null;
-    try {
-      const mod = await import('@sparticuz/chromium'); // optional
-      chromium = mod?.default ?? null;
-    } catch {
-      chromium = null;
-    }
+    const chromePath = getChromePath();
 
-    // Launch options (work on Render/Docker and locally)
     const launchOpts = {
       headless: true,
+      executablePath: chromePath || undefined, // puppeteer’s bundled chrome if not found (in dev)
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
-        '--disable-crash-reporter',
         '--disable-extensions',
-        '--disable-dev-profile',
+        '--disable-crash-reporter',
+        '--no-zygote',
+        '--single-process',
       ],
     };
 
-    // If Sparticuz is available, add its flags and executablePath.
-    if (chromium) {
-      // NOTE: modern @sparticuz/chromium exposes .args (array), not a function.
-      launchOpts.args = [...launchOpts.args, ...chromium.args];
-      launchOpts.executablePath = await chromium.executablePath();
-      process.env.LD_LIBRARY_PATH = `${process.env.LD_LIBRARY_PATH || ''}:${await chromium.libc()}`;
-      process.env.TMPDIR = process.env.TMPDIR || '/tmp';
-    }
-    // else: puppeteer will use system Chrome/Chromium per PUPPETEER_* env or its bundled browser.
-
     browser = await puppeteer.launch(launchOpts);
     const page = await browser.newPage();
+
+    // Page navigation
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
 
+    // Axe scan
     const results = await new AxePuppeteer(page).analyze();
-    await browser.close();
 
+    await browser.close();
     return { url, timestamp: new Date().toISOString(), results };
   } catch (e) {
     if (browser) await browser.close();
@@ -237,11 +233,8 @@ async function runPuppeteerScan(url) {
   }
 }
 
-
-/* ---------------------------------------------------------------------------
- * Optional In-Memory Queue (demo) for asynchronous scans
- * ------------------------------------------------------------------------- */
-const jobs = new Map();
+/* ------------------------- Optional in-memory queue (demo) ------------------------- */
+const jobs = new Map(); // id -> { id, status, url, result, error, createdAt, updatedAt }
 const queue = [];
 let processing = 0;
 const CONCURRENCY = Math.max(1, parseInt(process.env.JOB_CONCURRENCY || '2', 10));
@@ -263,7 +256,7 @@ function enqueueJob(url) {
   };
   jobs.set(id, job);
   queue.push(id);
-  processQueue().catch((err) => console.error('Queue error:', err));
+  processQueue().catch(err => console.error('Queue worker error:', err));
   return job;
 }
 
@@ -272,6 +265,7 @@ async function processQueue() {
     const jobId = queue.shift();
     const job = jobs.get(jobId);
     if (!job) continue;
+
     processing++;
     job.status = 'running';
     job.updatedAt = Date.now();
@@ -292,17 +286,16 @@ async function processQueue() {
   }
 }
 
-/* ---------------------------------------------------------------------------
- * Scan Endpoints
- *
- * - /scan can be synchronous or asynchronous. Use ?async=1 to queue a job.
- * ------------------------------------------------------------------------- */
+/* ------------------------- Scan endpoints ------------------------- */
+/**
+ * Synchronous by default (matches your current UI).
+ * Pass ?async=1 or { async: 1 } to enqueue and return a job id instead.
+ */
 app.get('/scan', requireApiKey, async (req, res) => {
   try {
     const { url, async: asyncFlag } = req.query;
     if (!url) return res.status(400).json({ error: 'url is required' });
 
-    // queue job if async=1
     if (String(asyncFlag) === '1') {
       const job = enqueueJob(String(url));
       return res.status(202).json({ jobId: job.id, status: job.status });
@@ -340,28 +333,21 @@ app.get('/scan/status/:id', requireApiKey, (req, res) => {
   res.json(job);
 });
 
-/* ---------------------------------------------------------------------------
- * Protect /crawl, /report, and /ai endpoints
- * ------------------------------------------------------------------------- */
+/* ------------------------- Protect + mount AI & report routes ------------------------- */
 app.use(['/crawl', '/report', '/ai'], requireApiKey);
 
-/* AI routes mounted */
-try {
-  app.use(aiVpatPdf);
-} catch {}
-try {
-  app.use(aiSummary);
-} catch {}
-try {
-  app.use(aiVpat);
-} catch {}
+try { app.use(aiVpatPdf); } catch (_) {}
+try { app.use(aiSummary); } catch (_) {}
+try { app.use(aiVpat); } catch (_) {}
 
-/* Crawl placeholder (not implemented) */
-app.get('/crawl', (_, res) => {
-  res.status(501).json({ error: 'Crawl via job queue not implemented. Use /scan.' });
+/* Crawl (placeholder) */
+app.get('/crawl', async (req, res) => {
+  res.status(501).json({
+    error: 'Crawl via job queue not implemented in demo. Use /scan to analyze individual pages.',
+  });
 });
 
-/* HTML Report */
+/* HTML report */
 app.post('/report', async (req, res) => {
   try {
     const { url, results, score } = req.body || {};
@@ -372,12 +358,34 @@ app.post('/report', async (req, res) => {
       if (v.impact && impacts[v.impact] !== undefined) impacts[v.impact]++;
     }
     const rows = violations
-      .map((v) => `<tr><td>${v.id}</td><td>${v.impact || ''}</td><td>${(v.tags || []).join(', ')}</td><td>${v.help || ''}</td></tr>`)
+      .map(
+        (v) =>
+          `<tr><td>${v.id}</td><td>${v.impact || ''}</td><td>${(v.tags || []).join(
+            ', '
+          )}</td><td>${v.help || ''}</td></tr>`
+      )
       .join('');
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Scan Report</title><style>body{font:14px/1.5 system-ui;margin:2rem}table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #eee;padding:.5rem;text-align:left}.badge{display:inline-block;background:#eef2ff;color:#3730a3;border-radius:999px;padding:2px 8px;margin-right:6px}</style></head><body>
-<h1>Scan Report</h1><p><span class="badge">${url || ''}</span><span class="badge">${now}</span><span class="badge">WCAG 2.2</span></p>
-<h2>Summary</h2><ul><li>Total violations: ${violations.length}</li><li>Critical: ${impacts.critical} • Serious: ${impacts.serious} • Moderate: ${impacts.moderate} • Minor: ${impacts.minor}</li><li>Estimated site score: ${typeof score === 'number' ? score + '/100' : 'n/a'}</li></ul>
-<h2>Findings</h2><table><thead><tr><th>Rule</th><th>Impact</th><th>WCAG tags</th><th>Help</th></tr></thead><tbody>${rows}</tbody></table></body></html>`;
+
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Scan Report</title>
+<style>
+body{font:14px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:2rem}
+table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #eee;padding:.5rem;text-align:left}
+.badge{display:inline-block;background:#eef2ff;color:#3730a3;border-radius:999px;padding:2px 8px;margin-right:6px}
+h1,h2{margin:0 0 1rem}
+</style>
+</head><body>
+<h1>Scan Report</h1>
+<p><span class="badge">${url || ''}</span> <span class="badge">${now}</span> <span class="badge">WCAG 2.2</span></p>
+<h2>Summary</h2>
+<ul>
+  <li>Total violations: ${violations.length}</li>
+  <li>Critical: ${impacts.critical} • Serious: ${impacts.serious} • Moderate: ${impacts.moderate} • Minor: ${impacts.minor}</li>
+  <li>Estimated site score: ${typeof score === 'number' ? score + '/100' : 'n/a'}</li>
+</ul>
+<h2>Findings</h2>
+<table><thead><tr><th>Rule</th><th>Impact</th><th>WCAG tags</th><th>Help</th></tr></thead><tbody>${rows}</tbody></table>
+</body></html>`;
+
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(html);
   } catch (e) {
@@ -385,27 +393,21 @@ app.post('/report', async (req, res) => {
   }
 });
 
-/* ---------------------------------------------------------------------------
- * Sample Files
- * ------------------------------------------------------------------------- */
+/* ------------------------- Samples ------------------------- */
 app.get('/samples/:name', (req, res) => {
   const p = path.join(__dirname, '..', 'samples', req.params.name);
   if (fs.existsSync(p)) res.sendFile(p);
   else res.status(404).send('Not found');
 });
 
-/* ---------------------------------------------------------------------------
- * Global Error Handler
- * ------------------------------------------------------------------------- */
+/* ------------------------- Global error handler ------------------------- */
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err && (err.stack || err.message || err));
   if (res.headersSent) return next(err);
   res.status(err?.status || 500).json({ error: 'internal server error' });
 });
 
-/* ---------------------------------------------------------------------------
- * Boot the server
- * ------------------------------------------------------------------------- */
+/* ------------------------- Boot ------------------------- */
 const port = process.env.PORT || 4002;
 server.listen(port, () => {
   console.log(`GopherA11y-TC Pro API listening on :${port}`);
