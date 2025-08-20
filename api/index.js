@@ -48,26 +48,32 @@ app.use(limiter);
  *
  * - Credentials (cookies, auth) are enabled so that Socket.IO can share session data.
  * ------------------------------------------------------------------------- */
+// Add near top:
 const isDev = process.env.NODE_ENV !== 'production';
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,https://gophera11y-tc-pro.vercel.app')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
 
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // server-to-server or same-origin calls (no Origin header)
-      if (!origin) return callback(null, true);
-      if (isDev) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-      return callback(new Error('CORS origin denied'));
-    },
-    credentials: true,
-  })
-);
+// Replace CORS use:
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true); // allow server-to-server and curl
+    if (isDev) return callback(null, true);
+    return allowedOrigins.includes(origin)
+      ? callback(null, true)
+      : callback(new Error('CORS origin denied'));
+  },
+  credentials: true,
+}));
 
-app.use(express.json({ limit: process.env.REQUEST_BODY_LIMIT || '1mb' }));
+// Create HTTP + Socket.IO server:
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: isDev ? '*' : allowedOrigins, methods: ['GET','POST'], credentials: true },
+  path: '/socket.io', // ensure client uses same path
+});
+
 
 /* ---------------------------------------------------------------------------
  * API Key Middleware
@@ -184,23 +190,53 @@ async function validateAndRejectPrivateHosts(urlString) {
 async function runPuppeteerScan(url) {
   let browser;
   try {
-    // If you installed system Chromium via apt (see Dockerfile), use that path.
-    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
-    browser = await puppeteer.launch({
-      headless: 'new',
-      executablePath,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
+    // Try to load Sparticuz chromium at runtime; if not installed, we just use system Chrome.
+    let chromium = null;
+    try {
+      const mod = await import('@sparticuz/chromium'); // optional
+      chromium = mod?.default ?? null;
+    } catch {
+      chromium = null;
+    }
+
+    // Launch options (work on Render/Docker and locally)
+    const launchOpts = {
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-crash-reporter',
+        '--disable-extensions',
+        '--disable-dev-profile',
+      ],
+    };
+
+    // If Sparticuz is available, add its flags and executablePath.
+    if (chromium) {
+      // NOTE: modern @sparticuz/chromium exposes .args (array), not a function.
+      launchOpts.args = [...launchOpts.args, ...chromium.args];
+      launchOpts.executablePath = await chromium.executablePath();
+      process.env.LD_LIBRARY_PATH = `${process.env.LD_LIBRARY_PATH || ''}:${await chromium.libc()}`;
+      process.env.TMPDIR = process.env.TMPDIR || '/tmp';
+    }
+    // else: puppeteer will use system Chrome/Chromium per PUPPETEER_* env or its bundled browser.
+
+    browser = await puppeteer.launch(launchOpts);
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
+
     const results = await new AxePuppeteer(page).analyze();
     await browser.close();
+
     return { url, timestamp: new Date().toISOString(), results };
   } catch (e) {
     if (browser) await browser.close();
     throw e;
   }
 }
+
 
 /* ---------------------------------------------------------------------------
  * Optional In-Memory Queue (demo) for asynchronous scans
