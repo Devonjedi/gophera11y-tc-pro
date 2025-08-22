@@ -8,11 +8,13 @@ export default function App({ Component, pageProps }: AppProps) {
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
-    // Avoid multiple connections in development
+    // Avoid duplicate connections in development
     if (typeof window === 'undefined' || socketRef.current) return;
 
     const apiOrigin =
-      process.env.NEXT_PUBLIC_API_ORIGIN || 'https://gophera11y-api.onrender.com';
+      process.env.NEXT_PUBLIC_API_ORIGIN ||
+      process.env.NEXT_PUBLIC_API_URL ||
+      'https://gophera11y-api.onrender.com';
 
     const socket = io(apiOrigin, {
       withCredentials: true,
@@ -23,13 +25,13 @@ export default function App({ Component, pageProps }: AppProps) {
     socket.on('connect', () => {
       console.log('[socket] connected', socket.id);
     });
-    socket.on('connect_error', err => {
+    socket.on('connect_error', (err) => {
       console.error('[socket] connect_error', err?.message || err);
     });
-    socket.on('notes:init', notes => {
+    socket.on('notes:init', (notes) => {
       console.log('[socket] notes:init', notes);
     });
-    socket.on('notes:updated', notes => {
+    socket.on('notes:updated', (notes) => {
       console.log('[socket] notes:updated', notes);
     });
 
