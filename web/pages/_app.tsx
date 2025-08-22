@@ -1,3 +1,4 @@
+// /web/pages/_app.tsx
 import type { AppProps } from 'next/app';
 import { useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
@@ -7,16 +8,17 @@ export default function App({ Component, pageProps }: AppProps) {
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
+    // No connection on server side or if already connected
     if (typeof window === 'undefined' || socketRef.current) return;
 
-    // Pull API origin from env or fall back to your Render domain
+    // API origin from env; fallback to Render API domain
     const apiOrigin =
       process.env.NEXT_PUBLIC_API_ORIGIN || 'https://gophera11y-api.onrender.com';
 
     const socket = io(apiOrigin, {
       withCredentials: true,
       transports: ['websocket', 'polling'],
-      path: '/socket.io', // must match server path
+      path: '/socket.io',
     });
 
     socket.on('connect', () => {
@@ -33,7 +35,7 @@ export default function App({ Component, pageProps }: AppProps) {
     });
 
     socketRef.current = socket;
-    // Expose globally for debugging if needed
+    // Attach to window for debugging
     (window as any).socket = socket;
 
     return () => {
