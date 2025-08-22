@@ -1,4 +1,3 @@
-// /pages/_app.tsx
 import type { AppProps } from 'next/app';
 import { useEffect, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
@@ -8,35 +7,34 @@ export default function App({ Component, pageProps }: AppProps) {
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
-    // Avoid duplicate connections in development
     if (typeof window === 'undefined' || socketRef.current) return;
 
+    // Pull API origin from env or fall back to your Render domain
     const apiOrigin =
-      process.env.NEXT_PUBLIC_API_ORIGIN ||
-      process.env.NEXT_PUBLIC_API_URL ||
-      'https://gophera11y-api.onrender.com';
+      process.env.NEXT_PUBLIC_API_ORIGIN || 'https://gophera11y-api.onrender.com';
 
     const socket = io(apiOrigin, {
       withCredentials: true,
       transports: ['websocket', 'polling'],
-      path: '/socket.io',
+      path: '/socket.io', // must match server path
     });
 
     socket.on('connect', () => {
       console.log('[socket] connected', socket.id);
     });
-    socket.on('connect_error', (err) => {
+    socket.on('connect_error', err => {
       console.error('[socket] connect_error', err?.message || err);
     });
-    socket.on('notes:init', (notes) => {
+    socket.on('notes:init', notes => {
       console.log('[socket] notes:init', notes);
     });
-    socket.on('notes:updated', (notes) => {
+    socket.on('notes:updated', notes => {
       console.log('[socket] notes:updated', notes);
     });
 
     socketRef.current = socket;
-    (window as any).socket = socket; // helpful for debugging
+    // Expose globally for debugging if needed
+    (window as any).socket = socket;
 
     return () => {
       socket.disconnect();
